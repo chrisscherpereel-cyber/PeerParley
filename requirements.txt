@@ -1,0 +1,12 @@
+streamlit>=1.36
+pandas>=2.2
+numpy>=1.26
+openpyxl>=3.1
+reportlab>=4.1
+cryptography>=42.0
+requests>=2.32
+msal>=1.28
+# Optional storage backends (install only what you use)
+dropbox>=11.36
+# PDF preview (optional; app degrades gracefully if absent)
+PyMuPDF>=1.24
