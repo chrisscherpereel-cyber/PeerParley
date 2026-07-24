@@ -190,7 +190,7 @@ with tabs[0]:
 
     st.divider()
     st.markdown("##### Send personal links")
-    base_url = st.text_input("Public app URL", cfg.public_url or "",
+    base_url = st.text_input("Public app URL", getattr(cfg, "public_url", "") or "",
                              help="The deployed address, e.g. https://yourapp.streamlit.app. "
                                   "Each student's link is this plus their signed token.")
     if cdf is not None:
@@ -253,7 +253,7 @@ with tabs[1]:
                                pd.DataFrame(nonresp).to_csv(index=False),
                                f"{slug}_nonresponders.csv", "text/csv")
             with st.expander("Send a reminder to non-responders"):
-                base_url = st.text_input("Public app URL", cfg.public_url or "", key="rem_url")
+                base_url = st.text_input("Public app URL", getattr(cfg, "public_url", "") or "", key="rem_url")
                 subj = st.text_input("Subject",
                                      "Reminder: your peer evaluation for {class}", key="rem_subj")
                 body = st.text_area("Body (HTML)", DEFAULT_INVITE_BODY, height=150, key="rem_body")
