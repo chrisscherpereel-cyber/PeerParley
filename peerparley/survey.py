@@ -226,15 +226,66 @@ def build_teams(contact_df: pd.DataFrame) -> Dict[str, List[dict]]:
 
 
 def save_setup(course: str, eval_no: str, contact_df: pd.DataFrame,
-               survey_cfg: Dict, vault: Optional[Vault] = None):
-    """Persist the roster snapshot + survey config for this course/eval."""
+               survey_cfg: Dict, vault: Optional[Vault] = None,
+               owner: Optional[str] = None):
+    """Persist the roster snapshot + survey config for this course/eval.
+
+    `owner` stamps who the survey belongs to; if omitted, any existing owner is
+    preserved so a re-save doesn't orphan a section.
+    """
     vault = vault or Vault()
     slug = slugify(course, eval_no)
     teams = build_teams(contact_df)
+    existing = load_roster_snapshot(vault, slug)
+    snap_owner = owner or (existing.get("owner") if existing else "") or ""
     _save_json(vault, key_roster(slug),
-               {"course": course, "eval_no": eval_no, "teams": teams})
+               {"course": course, "eval_no": eval_no, "teams": teams, "owner": snap_owner})
     _save_json(vault, key_survey(slug), survey_cfg)
     return slug, teams
+
+
+def survey_owner(vault: Vault, slug: str) -> Optional[str]:
+    """The owner username stamped on a survey, '' if unowned, None if missing."""
+    snap = load_roster_snapshot(vault, slug)
+    if snap is None:
+        return None
+    return snap.get("owner", "") or ""
+
+
+def list_surveys(vault: Optional[Vault] = None):
+    """Every survey in the vault, with owner + counts, for the picker."""
+    vault = vault or Vault()
+    try:
+        names = [n for n in vault.list()
+                 if str(n).startswith("roster__") and str(n).endswith(".ppj")]
+    except Exception:
+        names = []
+    out = []
+    for n in names:
+        try:
+            snap = _load_json(vault, n)
+        except Exception:
+            continue
+        teams = snap.get("teams", {})
+        out.append({"slug": n[len("roster__"):-len(".ppj")],
+                    "course": snap.get("course", ""), "eval_no": snap.get("eval_no", ""),
+                    "owner": snap.get("owner", "") or "", "teams": len(teams),
+                    "students": sum(len(v) for v in teams.values())})
+    return sorted(out, key=lambda s: (s["course"], str(s["eval_no"])))
+
+
+def can_access(owner: Optional[str], user: Optional[dict]) -> bool:
+    """Admins reach everything; instructors reach only what they own."""
+    if user and user.get("role") == "admin":
+        return True
+    return bool(user) and bool(owner) and owner == user.get("user")
+
+
+def visible_surveys(all_surveys, user: Optional[dict]):
+    if user and user.get("role") == "admin":
+        return all_surveys
+    me = (user or {}).get("user")
+    return [s for s in all_surveys if s.get("owner") == me]
 
 
 def load_roster_snapshot(vault: Vault, slug: str) -> Optional[dict]:
