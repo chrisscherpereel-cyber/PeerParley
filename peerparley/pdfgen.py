@@ -12,6 +12,7 @@ that student's name/team — no cross-student data leakage.
 from __future__ import annotations
 
 import io
+import math
 from typing import List
 
 from reportlab.lib.pagesizes import letter
@@ -67,6 +68,13 @@ def _wrap(c, text, x, y, width, font="Helvetica", size=10, leading=14, color=B.N
     return y
 
 
+def _is_nan(x) -> bool:
+    try:
+        return math.isnan(float(x))
+    except (TypeError, ValueError):
+        return True
+
+
 def _grade_meter(c, x, y, w, signed_pct):
     """Horizontal meter centered on 0, range -15..+15."""
     h = 0.28 * inch
@@ -91,9 +99,9 @@ def _grade_meter(c, x, y, w, signed_pct):
 
 
 def _perf_pill(c, x, y, label):
-    colors = {"High": B.GREEN, "Expected": B.GREY, "Low": B.AMBER}
+    colors = {"High": B.GREEN, "Expected": B.GREY, "Adequate": B.GREY, "Low": B.AMBER}
     col = colors.get(label, B.GREY)
-    w = 1.1 * inch
+    w = 1.2 * inch
     c.setFillColor(col)
     c.roundRect(x, y, w, 0.26 * inch, 8, fill=1, stroke=0)
     c.setFillColor(B.WHITE)
@@ -124,6 +132,42 @@ def build_individual_pdf(m: StudentResult, eval_no: str = "", course: str = "") 
     _grade_meter(c, MARGIN, y - 6, PAGE_W - 2 * MARGIN, m.signed_pct)
     y -= 60
 
+    # ---- rating-matrix dimension grades (+ self comparison + pay grade) ----
+    dims = [("Team player", m.team_player, m.self_team_player),
+            ("Quantity of work", m.quantity, m.self_quantity),
+            ("Quality of work", m.quality, m.self_quality),
+            ("Effect on the team", m.effect, m.self_effect)]
+    if any(peer for _, peer, _ in dims):
+        c.setFillColor(B.NAVY); c.setFont("Helvetica-Bold", 11)
+        c.drawString(MARGIN, y, "How your teammates rated you")
+        y -= 8
+        c.setStrokeColor(B.GREEN_LIGHT); c.setLineWidth(2)
+        c.line(MARGIN, y, MARGIN + 2.6 * inch, y)
+        y -= 18
+        show_self = m.self_responded and any(s for _, _, s in dims)
+        c.setFont("Helvetica-Bold", 8.5); c.setFillColor(B.GREY)
+        c.drawString(MARGIN, y, "Dimension")
+        c.drawString(MARGIN + 2.7 * inch, y, "Peers")
+        if show_self:
+            c.drawString(MARGIN + 3.5 * inch, y, "Your self-rating")
+        y -= 14
+        for label, peer, selfg in dims:
+            c.setFont("Helvetica", 10); c.setFillColor(B.NAVY)
+            c.drawString(MARGIN, y, label)
+            c.setFont("Helvetica-Bold", 11)
+            c.drawString(MARGIN + 2.7 * inch, y, peer or "—")
+            if show_self:
+                c.setFont("Helvetica", 10); c.setFillColor(B.GREY)
+                c.drawString(MARGIN + 3.5 * inch, y, selfg or "—")
+                c.setFillColor(B.NAVY)
+            y -= 16
+        if not _is_nan(m.pay_grade):
+            c.setFont("Helvetica", 10); c.setFillColor(B.GREY)
+            c.drawString(MARGIN, y, f"Pay grade: {m.pay_grade:.0%} of the team average "
+                                    "(100% = an even share).")
+            c.setFillColor(B.NAVY)
+        y -= 26
+
     c.setFillColor(B.NAVY)
     c.setFont("Helvetica-Bold", 11)
     c.drawString(MARGIN, y, "What your teammates said")
@@ -138,7 +182,7 @@ def build_individual_pdf(m: StudentResult, eval_no: str = "", course: str = "") 
                   MARGIN, y, PAGE_W - 2 * MARGIN, "Helvetica-Oblique", 10, color=B.GREY)
     else:
         for i, txt in enumerate(anon, 1):
-            y = _wrap(c, f"“{txt}”", MARGIN, y, PAGE_W - 2 * MARGIN,
+            y = _wrap(c, "“" + txt + "”", MARGIN, y, PAGE_W - 2 * MARGIN,
                       "Helvetica", 10, 15, B.NAVY)
             y -= 8
 
@@ -173,7 +217,8 @@ def build_team_contribution_pdf(team: TeamResult, eval_no: str = "") -> bytes:
         c.drawString(MARGIN, y, m.name)
         avg = (sum(m.received_breakdown) / len(m.received_breakdown)) if m.received_breakdown else 0
         c.drawString(MARGIN + 3.0 * inch, y, f"{avg:.1f} / {m.expected_share:g}")
-        col = {"High": B.GREEN, "Expected": B.GREY, "Low": B.AMBER}.get(m.performance, B.GREY)
+        col = {"High": B.GREEN, "Expected": B.GREY, "Adequate": B.GREY,
+               "Low": B.AMBER}.get(m.performance, B.GREY)
         c.setFillColor(col); c.setFont("Helvetica-Bold", 9)
         c.drawString(MARGIN + 4.4 * inch, y, m.performance)
         y -= 18
@@ -209,39 +254,44 @@ def build_section_summary_pdf(teams: List[TeamResult], course: str = "",
         y -= 6
         c.setStrokeColor(B.GREEN_LIGHT); c.setLineWidth(1.5)
         c.line(MARGIN, y, PAGE_W - MARGIN, y); y -= 16
-        c.setFont("Helvetica-Bold", 8.5); c.setFillColor(B.GREY)
-        for label, dx in [("Name", 0), ("Ratio", 3.0), ("A", 3.7), ("Q", 4.2),
-                          ("Mult", 4.7), ("Grade Δ", 5.4), ("Perf", 6.3)]:
+        c.setFont("Helvetica-Bold", 8); c.setFillColor(B.GREY)
+        cols = [("Name", 0), ("TP", 2.5), ("Qn", 2.9), ("Ql", 3.3), ("Ef", 3.7),
+                ("Pay", 4.1), ("Q", 4.7), ("Mult", 5.1), ("Grade Δ", 5.7), ("Perf", 6.5)]
+        for label, dx in cols:
             c.drawString(MARGIN + dx * inch, y, label)
         y -= 13
         for m in t.members:
-            c.setFont("Helvetica", 8.5); c.setFillColor(B.NAVY)
-            c.drawString(MARGIN, y, m.name[:34])
-            c.drawString(MARGIN + 3.0 * inch, y, f"{m.peer_ratio:g}")
-            c.drawString(MARGIN + 3.7 * inch, y, f"{m.A:g}")
-            c.drawString(MARGIN + 4.2 * inch, y, f"{m.Q:g}")
-            c.drawString(MARGIN + 4.7 * inch, y, f"{m.multiplier:g}")
+            c.setFont("Helvetica", 8); c.setFillColor(B.NAVY)
+            c.drawString(MARGIN, y, m.name[:28])
+            c.drawString(MARGIN + 2.5 * inch, y, m.team_player or "—")
+            c.drawString(MARGIN + 2.9 * inch, y, m.quantity or "—")
+            c.drawString(MARGIN + 3.3 * inch, y, m.quality or "—")
+            c.drawString(MARGIN + 3.7 * inch, y, m.effect or "—")
+            c.drawString(MARGIN + 4.1 * inch, y,
+                         "" if _is_nan(m.pay_grade) else f"{m.pay_grade:.0%}")
+            c.drawString(MARGIN + 4.7 * inch, y, f"{m.Q:g}")
+            c.drawString(MARGIN + 5.1 * inch, y, f"{m.multiplier:g}")
             c.setFillColor(B.grade_color(m.signed_pct))
-            c.drawString(MARGIN + 5.4 * inch, y,
+            c.drawString(MARGIN + 5.7 * inch, y,
                          f"{'+' if m.signed_pct >= 0 else ''}{m.signed_pct:g}%")
             c.setFillColor(B.NAVY)
-            c.drawString(MARGIN + 6.3 * inch, y, m.performance)
+            c.drawString(MARGIN + 6.5 * inch, y, m.performance[:9])
             y -= 13
             if y < MARGIN + inch:
                 _footer(c); c.showPage(); y = PAGE_H - MARGIN
         y -= 12
 
-    # legend
-    if y < MARGIN + 1.6 * inch:
+    if y < MARGIN + 1.8 * inch:
         _footer(c); c.showPage(); y = PAGE_H - MARGIN
     c.setFillColor(B.NAVY); c.setFont("Helvetica-Bold", 9)
     c.drawString(MARGIN, y, "What each column means"); y -= 14
     legend = [
-        "Ratio = points received vs fair share (1.0 = exactly average).",
-        "A = evaluator agreement weight (1.0 = evaluators agree; lower = they disagree).",
-        "Q = written-comment support score (0-1).",
-        "Mult = final grade multiplier applied to the team score.",
+        "TP / Qn / Ql / Ef = letter grades for Team Player, Quantity, Quality, Effect "
+        "(from the 4-statement rating matrix).",
+        "Pay = average received allocation vs the team average (100% = an even share).",
+        "Q = written-comment support score (0-1); Mult = final grade multiplier.",
         "Grade Δ = signed adjustment vs the team score.",
+        "Perf = performance from the forced ranking (High / Adequate / Low).",
     ]
     for ln in legend:
         y = _wrap(c, "• " + ln, MARGIN, y, PAGE_W - 2 * MARGIN,

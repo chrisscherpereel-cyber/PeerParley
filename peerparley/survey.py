@@ -438,6 +438,46 @@ def _num(v):
         return float("nan")
 
 
+def _rank_num(category) -> float:
+    """Forced-ranking category -> 1 (High) / 2 (Adequate) / 3 (Low)."""
+    if not category:
+        return float("nan")
+    c = str(category).lower()
+    if "high" in c:
+        return 1.0
+    if "low" in c:
+        return 3.0
+    if "adequate" in c or "expected" in c or "medium" in c:
+        return 2.0
+    return float("nan")
+
+
+def self_evaluations(vault: Vault, slug: str) -> Dict:
+    """Map (team, name_key) -> the student's self-ratings + self rank, for the
+    self-evaluation section of the grade/feedback."""
+    from .ingest import name_key as _nk
+    snap = load_roster_snapshot(vault, slug)
+    if not snap:
+        return {}
+    teams = snap.get("teams", {})
+    out: Dict = {}
+    for resp in all_responses(vault, slug):
+        team = resp.get("team", "")
+        members = teams.get(team, [])
+        pos = int(resp.get("pos", -1))
+        if pos < 0 or pos >= len(members):
+            continue
+        self_ans = (resp.get("members") or {}).get(str(pos))
+        if not self_ans:
+            continue
+        out[(team, _nk(members[pos]["name"]))] = {
+            "ratings": self_ans.get("ratings"),
+            "rank": _rank_num(self_ans.get("rank")),
+            "self_contribution": resp.get("self_contribution", ""),
+        }
+    return out
+
+
 def responses_to_long(vault: Vault, slug: str) -> pd.DataFrame:
     """Turn collected submissions into the tidy long-format the grader consumes:
     one row per (evaluator -> evaluatee). Points come from the $100 allocation and
@@ -468,14 +508,19 @@ def responses_to_long(vault: Vault, slug: str) -> pd.DataFrame:
                 improve = str((ans or {}).get("improve", "") or "").strip()
                 contribution = str((ans or {}).get("contribution", "") or "").strip()
                 pub = " ".join(t for t in (contribution, improve) if t).strip()
-                rows.append({
+                ratings = (ans or {}).get("ratings") or []
+                row = {
                     "evaluator": evaluator, "evaluator_key": ev_key,
                     "evaluator_team": team, "evaluatee": members[tpos]["name"],
                     "evaluatee_key": name_key(members[tpos]["name"]),
                     "points": _num((ans or {}).get("alloc")),
                     "public_comment": pub,
                     "confidential_comment": conf if first else "",
-                })
+                    "rank": _rank_num((ans or {}).get("rank")),
+                }
+                for d in range(4):
+                    row[f"r{d}"] = _num(ratings[d]) if d < len(ratings) else float("nan")
+                rows.append(row)
                 first = False
         else:  # legacy flat payload (alloc/comments)
             alloc = resp.get("alloc", {}) or {}

@@ -9,20 +9,54 @@ configurable min/max multipliers.
   A           : agreement weight from SD of received points (evaluator consensus)
   Q           : comment support score for that student (0..1), from comments.py
 
-Performance column: selectable method; default = "Allocation ratio"
-(avg allocation received / team average, banded +-8%).
-An agreement guard softens forced "Low" ratings when evaluator disagreement
-is high.
+In addition — reproducing the original PeerParley workbook — this engine also
+computes, when the survey collected them:
+
+  * Per-dimension letter grades from the 4-statement rating matrix
+    (Team Player / Quantity / Quality / Effect), each = mean(rating)/7 → letter.
+  * Performance from the FORCED RANKING (High / Adequate / Low) when present,
+    otherwise from the allocation ratio (banded ±8%).
+  * Pay grade = a student's average received allocation ÷ the team average.
+  * Self-evaluation grades from the student's ratings of themselves.
+
+All of the extra inputs are optional: with only allocation + comments (e.g. a
+plain Qualtrics export), the engine behaves exactly as before and the extra
+fields are simply blank.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 from .comments import score_comment
+
+
+# --------------------------------------------------------------------------- #
+# Scales
+# --------------------------------------------------------------------------- #
+GRADE_SCALE: List[Tuple[float, str]] = [
+    (0.00, "F"), (0.36, "D"), (0.43, "C-"), (0.50, "C"), (0.57, "C+"),
+    (0.64, "B-"), (0.78, "B"), (0.81, "B+"), (0.86, "A-"), (0.93, "A"), (1.00, "A"),
+]
+DIMENSIONS = ["Team Player", "Quantity", "Quality", "Effect"]
+
+
+def letter_grade(value) -> str:
+    """Map a 0..1 score to a letter grade (blank for missing)."""
+    try:
+        if value is None or math.isnan(float(value)):
+            return ""
+    except (TypeError, ValueError):
+        return ""
+    out = GRADE_SCALE[0][1]
+    for thr, lbl in GRADE_SCALE:
+        if value >= thr:
+            out = lbl
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -42,7 +76,6 @@ class GradeSettings:
     agreement_guard: bool = True
 
 
-# Agreement weight A: banded by SD of received points as % of expected share
 def agreement_weight(received: List[float], expected_share: float) -> float:
     vals = [v for v in received if v == v]  # drop NaN
     if len(vals) < 2 or expected_share <= 0:
@@ -88,9 +121,25 @@ class StudentResult:
     multiplier: float
     individual_score: float
     signed_pct: float           # deviation from team score, signed
-    performance: str            # High / Expected / Low (or method label)
+    performance: str            # High / Adequate / Expected / Low
     comment_points: int
     submitted_self_eval: bool
+    # ---- rating-matrix dimension grades + pay grade (workbook parity) ----
+    pay_grade: float = float("nan")
+    peer_vals: List[float] = field(default_factory=lambda: [float("nan")] * 4)
+    team_player: str = ""
+    quantity: str = ""
+    quality: str = ""
+    effect: str = ""
+    forced_rank_mean: float = float("nan")
+    # ---- self-evaluation ----
+    self_responded: bool = False
+    self_vals: List[float] = field(default_factory=lambda: [float("nan")] * 4)
+    self_team_player: str = ""
+    self_quantity: str = ""
+    self_quality: str = ""
+    self_effect: str = ""
+    # ---- comments ----
     public_comments: List[str] = field(default_factory=list)
     confidential_comments: List[str] = field(default_factory=list)
     received_breakdown: List[float] = field(default_factory=list)
@@ -103,10 +152,7 @@ class TeamResult:
     team_score: float
 
 
-def _performance_label(
-    method: str, received_avg: float, team_avg: float, band: float,
-    rank: int, n: int,
-) -> str:
+def _performance_label(method, received_avg, team_avg, band, rank, n):
     if method == "rank_linear":
         if n <= 1:
             return "Expected"
@@ -115,7 +161,6 @@ def _performance_label(
         return "High" if top else ("Low" if bottom else "Expected")
     if method == "rank_one_mean":
         return "High" if rank == 1 else "Expected"
-    # allocation_ratio / composite default
     if team_avg <= 0:
         return "Expected"
     ratio = received_avg / team_avg
@@ -126,6 +171,26 @@ def _performance_label(
     return "Expected"
 
 
+def _forced_performance(mean_rank: float) -> Optional[str]:
+    """Forced ranking: 1=High, 2=Adequate, 3=Low → High/Adequate/Low."""
+    if mean_rank is None or (isinstance(mean_rank, float) and math.isnan(mean_rank)):
+        return None
+    v = (3.0 - mean_rank) / 2.0          # rank 1 → 1.0, 2 → 0.5, 3 → 0.0
+    if v >= 0.8:
+        return "High"
+    if v >= 0.4:
+        return "Adequate"
+    return "Low"
+
+
+def _num(v):
+    try:
+        f = float(v)
+        return f if not math.isnan(f) else None
+    except (TypeError, ValueError):
+        return None
+
+
 # --------------------------------------------------------------------------- #
 # Core computation
 # --------------------------------------------------------------------------- #
@@ -133,25 +198,32 @@ def compute(
     long_df: pd.DataFrame,
     settings: GradeSettings,
     team_scores: Optional[Dict[str, float]] = None,
+    self_evals: Optional[Dict] = None,
 ) -> List[TeamResult]:
-    """Compute per-team, per-student results from tidy long-format data."""
+    """Per-team, per-student results from tidy long-format data.
+
+    Optional long_df columns `r0..r3` (1–7 ratings for the four statements) and
+    `rank` (1/2/3 forced ranking) drive the dimension grades and performance when
+    present. `self_evals` maps (team, name_key) -> {ratings, rank} for self grades.
+    """
     team_scores = team_scores or {}
+    self_evals = self_evals or {}
     if long_df.empty:
         return []
 
     results: List[TeamResult] = []
-    # infer team per student (evaluatee) via evaluator_team of their teammates
     ev_team = (
         long_df.dropna(subset=["evaluator_team"])
         .groupby("evaluator_key")["evaluator_team"].first().to_dict()
     )
 
-    # attach team to each evaluatee (their evaluators share the team)
     def team_of(key: str) -> str:
         return ev_team.get(key, "")
 
     long_df = long_df.copy()
     long_df["team"] = long_df["evaluator_key"].map(team_of)
+    has_ratings = all(f"r{d}" in long_df.columns for d in range(4))
+    has_rank = "rank" in long_df.columns
 
     for team, tdf in long_df.groupby("team"):
         if team == "":
@@ -160,34 +232,41 @@ def compute(
         member_keys = [k for k in member_keys if k]
         n = len(member_keys)
         expected_share = 100.0 / (n - 1) if n > 1 else 100.0
-
         ts = float(team_scores.get(team, settings.team_score_default))
         submitters = set(tdf["evaluator_key"])
 
-        # received points per member
         received: Dict[str, List[float]] = {k: [] for k in member_keys}
         pub: Dict[str, List[str]] = {k: [] for k in member_keys}
         conf: Dict[str, List[str]] = {k: [] for k in member_keys}
+        dims: Dict[str, List[List[float]]] = {k: [[], [], [], []] for k in member_keys}
+        ranks_recv: Dict[str, List[float]] = {k: [] for k in member_keys}
         display_name: Dict[str, str] = {}
 
         for _, r in tdf.iterrows():
             k = r["evaluatee_key"]
             if k not in received:
-                received[k] = []
-                pub[k] = []; conf[k] = []
+                received[k] = []; pub[k] = []; conf[k] = []
+                dims[k] = [[], [], [], []]; ranks_recv[k] = []
             if r["points"] == r["points"]:
                 received[k].append(float(r["points"]))
             if r.get("public_comment"):
                 pub[k].append(str(r["public_comment"]).strip())
             if r.get("confidential_comment"):
                 conf[k].append(str(r["confidential_comment"]).strip())
+            if has_ratings:
+                for d in range(4):
+                    v = _num(r.get(f"r{d}"))
+                    if v is not None:
+                        dims[k][d].append(v)
+            if has_rank:
+                rk = _num(r.get("rank"))
+                if rk is not None:
+                    ranks_recv[k].append(rk)
             display_name.setdefault(k, r["evaluatee"])
         for _, r in tdf.iterrows():
             display_name.setdefault(r["evaluator_key"], r["evaluator"])
 
-        received_avgs = {
-            k: (float(np.mean(v)) if v else 0.0) for k, v in received.items()
-        }
+        received_avgs = {k: (float(np.mean(v)) if v else 0.0) for k, v in received.items()}
         team_avg = float(np.mean([v for v in received_avgs.values()])) if received_avgs else 0.0
         ranking = sorted(member_keys, key=lambda k: received_avgs.get(k, 0), reverse=True)
         rank_of = {k: i + 1 for i, k in enumerate(ranking)}
@@ -195,14 +274,13 @@ def compute(
         members: List[StudentResult] = []
         for k in member_keys:
             all_pub = pub.get(k, [])
-            # comment support Q from best public comment vs others in team
             others = [c for kk, cl in pub.items() if kk != k for c in cl]
             best_q, best_pts = 0.0, 0
             for c in all_pub:
                 cs = score_comment(c, others, settings.max_comment_points)
                 if cs.q >= best_q:
                     best_q, best_pts = cs.q, cs.points
-            Q = best_q if all_pub else 0.5  # neutral when no comment provided
+            Q = best_q if all_pub else 0.5
 
             rec = received.get(k, [])
             received_total = float(np.sum(rec)) if rec else 0.0
@@ -210,47 +288,73 @@ def compute(
             peer_ratio = (ravg / expected_share) if expected_share > 0 else 1.0
             A = agreement_weight(rec, expected_share)
 
-            perf = _performance_label(
-                settings.performance_method, ravg, team_avg,
-                settings.performance_band, rank_of.get(k, n), n,
-            )
+            # ---- dimension grades from the rating matrix ----
+            peer_vals = [float("nan")] * 4
+            for d in range(4):
+                if dims[k][d]:
+                    peer_vals[d] = float(np.mean(dims[k][d])) / 7.0
+            dim_letters = [letter_grade(v) for v in peer_vals]
 
-            # Agreement guard: soften forced "Low" when evaluators disagree a lot
-            if settings.agreement_guard and perf == "Low" and A <= 0.5:
-                perf = "Expected"
+            # ---- performance: forced ranking if we have it, else allocation ----
+            rmean = float(np.mean(ranks_recv[k])) if ranks_recv[k] else float("nan")
+            forced = _forced_performance(rmean)
+            if forced is not None:
+                perf = forced
+            else:
+                perf = _performance_label(settings.performance_method, ravg, team_avg,
+                                          settings.performance_band, rank_of.get(k, n), n)
+                if settings.agreement_guard and perf == "Low" and A <= 0.5:
+                    perf = "Expected"
+
+            # ---- pay grade (relative to team average) ----
+            pay_grade = (ravg / team_avg) if team_avg > 0 else float("nan")
 
             raw_mult = 1 + settings.sensitivity_B * A * Q * (peer_ratio - 1)
             mult = max(settings.min_multiplier, min(settings.max_multiplier, raw_mult))
             individual = ts * mult
-            signed = _round_pct(individual - ts, settings.rounding_step,
-                                settings.rounding_mode)
+            signed = _round_pct(individual - ts, settings.rounding_step, settings.rounding_mode)
 
-            submitted = k in submitters
+            # ---- self evaluation ----
+            self_vals = [float("nan")] * 4
+            self_responded = False
+            se = self_evals.get((team, k))
+            if se and se.get("ratings"):
+                for d, v in enumerate(se["ratings"][:4]):
+                    vv = _num(v)
+                    if vv is not None:
+                        self_vals[d] = vv / 7.0
+                self_responded = any(not math.isnan(x) for x in self_vals)
+            self_letters = [letter_grade(v) for v in self_vals]
+
             members.append(StudentResult(
-                name=display_name.get(k, k),
-                key=k,
-                team=team,
-                team_score=ts,
-                received_total=round(received_total, 2),
-                expected_share=round(expected_share, 2),
-                peer_ratio=round(peer_ratio, 3),
-                A=A, Q=round(Q, 3),
-                multiplier=round(mult, 4),
-                individual_score=round(individual, 2),
-                signed_pct=signed,
-                performance=perf,
-                comment_points=best_pts,
-                submitted_self_eval=submitted,
-                public_comments=all_pub,
-                confidential_comments=conf.get(k, []),
-                received_breakdown=[round(x, 1) for x in rec],
-            ))
-
+                name=display_name.get(k, k), key=k, team=team, team_score=ts,
+                received_total=round(received_total, 2), expected_share=round(expected_share, 2),
+                peer_ratio=round(peer_ratio, 3), A=A, Q=round(Q, 3), multiplier=round(mult, 4),
+                individual_score=round(individual, 2), signed_pct=signed, performance=perf,
+                comment_points=best_pts, submitted_self_eval=(k in submitters),
+                pay_grade=pay_grade, peer_vals=peer_vals,
+                team_player=dim_letters[0], quantity=dim_letters[1],
+                quality=dim_letters[2], effect=dim_letters[3],
+                forced_rank_mean=rmean,
+                self_responded=self_responded, self_vals=self_vals,
+                self_team_player=self_letters[0], self_quantity=self_letters[1],
+                self_quality=self_letters[2], self_effect=self_letters[3],
+                public_comments=all_pub, confidential_comments=conf.get(k, []),
+                received_breakdown=[round(x, 1) for x in rec]))
         members.sort(key=lambda m: m.name.lower())
         results.append(TeamResult(team=team, members=members, team_score=ts))
 
     results.sort(key=lambda t: t.team.lower())
     return results
+
+
+def _pct(x) -> str:
+    try:
+        if math.isnan(float(x)):
+            return ""
+    except (TypeError, ValueError):
+        return ""
+    return f"{x:.0%}"
 
 
 def results_to_frame(teams: List[TeamResult]) -> pd.DataFrame:
@@ -260,8 +364,11 @@ def results_to_frame(teams: List[TeamResult]) -> pd.DataFrame:
             rows.append({
                 "Team": t.team,
                 "Name": m.name,
-                "Team Score": m.team_score if m.submitted_self_eval else m.team_score,
-                "Received (avg vs share)": f"{m.received_total} / {m.expected_share}",
+                "Team Player": m.team_player,
+                "Quantity": m.quantity,
+                "Quality": m.quality,
+                "Effect": m.effect,
+                "Pay Grade": _pct(m.pay_grade),
                 "Peer Ratio": m.peer_ratio,
                 "A (agreement)": m.A,
                 "Q (comment)": m.Q,
