@@ -4,11 +4,13 @@ Runs on Streamlit Cloud. All student PII is encrypted at rest and persisted
 only to the university-controlled vault (M365 / Dropbox / pCloud). The public
 host never stores plaintext PII.
 
-Workflow (one app, five steps):
-    1. Sign in            5. Deliver / draft emails
-    2. Upload & map       ← plus: save/load encrypted vault bundles
-    3. Configure grading
-    4. Review + PDFs
+Workflow (one app):
+    Set up & send survey  →  Collect responses  →  (or Upload a Qualtrics export)
+    →  Configure grading   →  Review + PDFs      →  Deliver / draft emails
+    plus: save/load encrypted vault bundles.
+
+Students never sign in: a personal ?t=<token> link opens their evaluation form
+directly (see peerparley/survey.py), bypassing the instructor password gate.
 """
 from __future__ import annotations
 
@@ -23,6 +25,7 @@ from peerparley import __version__
 from peerparley.auth import logout, require_login
 from peerparley.config import load_config
 from peerparley import ingest
+from peerparley import survey
 from peerparley.grading import GradeSettings, compute, results_to_frame
 from peerparley import pdfgen
 from peerparley import email_delivery as mail
@@ -51,6 +54,21 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# --------------------------------------------------------------------------- #
+# Student form — the only public surface. A valid ?t=<token> link renders the
+# student's personal evaluation and records their submission, BEFORE (and
+# instead of) the instructor password gate.
+# --------------------------------------------------------------------------- #
+_token = None
+try:
+    _token = st.query_params.get("t")
+except Exception:
+    _qp = st.experimental_get_query_params()
+    _token = (_qp.get("t") or [None])[0]
+if _token:
+    survey.render_student_app(_token)
+    st.stop()
+
 if not require_login():
     st.stop()
 
@@ -69,16 +87,220 @@ course = st.sidebar.text_input("Course / section", S.get("course", ""))
 eval_no = st.sidebar.text_input("Evaluation #", S.get("eval_no", "1"))
 S["course"], S["eval_no"] = course, eval_no
 
+DEFAULT_INVITE_BODY = (
+    "Hi {first_name},<br><br>"
+    "It's time for the peer evaluation for {class} (Evaluation {eval_no}). "
+    "Please open your personal link below and split your points across your "
+    "teammates. It only takes a few minutes, and you can revise until it "
+    "closes.<br><br>"
+    '<a href="{link}">Open my peer evaluation</a><br><br>'
+    "If the button doesn't work, copy this address into your browser:<br>"
+    "{link}<br><br>Thanks,<br>The teaching team"
+)
+
+
+def _deliver(messages, drafts_only, ok_label="Done"):
+    """Shared send routine for invite/reminder emails (reuses the app mailer)."""
+    if not messages:
+        st.warning("No recipients with an email address.")
+        return
+    st.write(f"Prepared {len(messages)} message(s).")
+    mailer = _make_mailer(cfg)
+    if mailer is None:
+        return
+    prog = st.progress(0.0)
+    log = st.empty()
+    lines = []
+
+    def _cb(i, total, status):
+        prog.progress(i / total)
+        lines.append(status)
+        log.code("\n".join(lines[-12:]))
+
+    result = mail.batch_send(messages, mailer, drafts_only=drafts_only, progress=_cb)
+    st.success(f"{ok_label} — sent {result['sent']}, drafted {result['drafted']}, "
+               f"failed {len(result['failed'])} of {result['total']}.")
+    if result["failed"]:
+        st.dataframe(pd.DataFrame(result["failed"]))
+
+
 tabs = st.tabs([
-    "1 · Upload & map", "2 · Configure", "3 · Review & PDFs",
-    "4 · Email", "5 · Vault",
+    "1 · Survey setup", "2 · Responses",
+    "3 · Upload & map", "4 · Configure", "5 · Review & PDFs",
+    "6 · Email", "7 · Vault",
 ])
 
 # =========================================================================== #
-# TAB 1 — Upload & map
+# TAB 1 — Survey setup (upload contact list, configure, send links)
 # =========================================================================== #
 with tabs[0]:
+    st.subheader("Set up & send the survey")
+    st.caption("Upload the **contact list** (names, emails, teams) — the only input "
+               "needed. PeerParley builds a personal evaluation link for every "
+               "student; their answers become the grading input directly.")
+    slug = survey.slugify(course, eval_no)
+    st.caption(f"Course **{course or '—'}**, Eval **{eval_no}** → survey id `{slug}`")
+
+    contact_file = st.file_uploader("Contact list (CSV/XLSX)",
+                                    type=["csv", "xlsx", "xls"], key="survey_roster")
+    if contact_file is not None:
+        S["survey_contact_df"] = ingest.read_table(contact_file, contact_file.name)
+    cdf = S.get("survey_contact_df")
+
+    if cdf is not None:
+        teams_preview = survey.build_teams(cdf)
+        nstud = sum(len(v) for v in teams_preview.values())
+        st.success(f"{len(teams_preview)} team(s), {nstud} student(s) with teammates.")
+        with st.expander("Teams preview"):
+            for t, members in teams_preview.items():
+                st.write(f"**Team {t}** — " + ", ".join(m["name"] for m in members))
+        no_email = [m["name"] for members in teams_preview.values()
+                    for m in members if not m.get("email")]
+        if no_email:
+            st.warning(f"{len(no_email)} student(s) have no email and can't be sent a "
+                       "link: " + ", ".join(no_email[:8]) + ("…" if len(no_email) > 8 else ""))
+
+    cur = S.get("survey_cfg") or dict(survey.DEFAULT_SURVEY)
+    with st.expander("Survey wording & options"):
+        cur["title"] = st.text_input("Title", cur["title"])
+        cur["intro"] = st.text_area("Intro (markdown)", cur["intro"], height=90)
+        cur["points_total"] = int(st.number_input("Points each student allocates",
+                                                   10, 1000, int(cur["points_total"]), 10))
+        cur["ask_public_comment"] = st.checkbox("Ask for a comment on each teammate",
+                                                value=cur["ask_public_comment"])
+        cur["public_comment_prompt"] = st.text_input("Comment prompt",
+                                                     cur["public_comment_prompt"])
+        cur["ask_confidential"] = st.checkbox("Ask for a confidential note to the instructor",
+                                              value=cur["ask_confidential"])
+        cur["confidential_prompt"] = st.text_input("Confidential prompt",
+                                                   cur["confidential_prompt"])
+        cur["is_open"] = st.toggle("Survey is OPEN (students can submit)",
+                                   value=cur["is_open"])
+    S["survey_cfg"] = cur
+
+    if st.button("💾 Save survey + roster to vault", type="primary", disabled=cdf is None):
+        try:
+            sl, teams = survey.save_setup(course, eval_no, cdf, cur)
+            st.success(f"Saved survey `{sl}` — {len(teams)} team(s). Students' links are "
+                       "now live." + ("" if cfg.vault.backend != "local" else
+                       " (Backend is 'local' — fine for testing, but responses live only "
+                       "in this container. Use m365/dropbox/pcloud for real collection.)"))
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Save failed: {exc}")
+
+    st.divider()
+    st.markdown("##### Send personal links")
+    base_url = st.text_input("Public app URL", cfg.public_url or "",
+                             help="The deployed address, e.g. https://yourapp.streamlit.app. "
+                                  "Each student's link is this plus their signed token.")
+    if cdf is not None:
+        links = survey.student_links(base_url, slug, survey.build_teams(cdf),
+                                     survey.token_secret(cfg))
+        links_df = pd.DataFrame(links)
+        with st.expander(f"Preview {len(links)} links"):
+            st.dataframe(links_df, use_container_width=True, height=280)
+            st.download_button("⬇ links.csv", links_df.to_csv(index=False),
+                               f"{slug}_links.csv", "text/csv")
+        subj = st.text_input("Email subject",
+                             "Your peer evaluation for {class} (Eval {eval_no})", key="inv_subj")
+        body = st.text_area("Email body (HTML)", DEFAULT_INVITE_BODY, height=180, key="inv_body")
+        drafts_only = st.checkbox("Create Outlook drafts only (no send)",
+                                  value=(cfg.email.mode == "graph"), key="inv_drafts")
+        if st.button("Build & deliver links", key="inv_go"):
+            if not base_url.strip():
+                st.error("Enter the public app URL first, or the links won't point anywhere.")
+            else:
+                msgs = []
+                for r in links:
+                    if not r["email"]:
+                        continue
+                    ctx = {"first_name": r["name"].split(" ")[0], "last_name": r["name"].split(" ")[-1],
+                           "name": r["name"], "team": r["team"], "eval_no": eval_no,
+                           "class": course, "link": r["link"]}
+                    msgs.append(mail.Message(
+                        to_email=r["email"], to_name=r["name"], team=r["team"],
+                        subject=mail.render_template(subj, ctx),
+                        body=mail.render_template(body, ctx), attachments=[]))
+                _deliver(msgs, drafts_only, ok_label="Links delivered")
+
+# =========================================================================== #
+# TAB 2 — Responses (monitor + load into grading)
+# =========================================================================== #
+with tabs[1]:
+    st.subheader("Responses")
+    slug = survey.slugify(course, eval_no)
+    vault = Vault()
+    status = survey.response_status(vault, slug)
+    if not status:
+        st.info("No saved survey for this course/eval yet — set one up in step 1.")
+    else:
+        got = sum(1 for r in status if r["responded"])
+        m1, m2 = st.columns(2)
+        m1.metric("Responded", f"{got} / {len(status)}")
+        m2.metric("Outstanding", len(status) - got)
+
+        sdf = pd.DataFrame(status)
+        by_team = (sdf.groupby("team")["responded"]
+                   .agg(["sum", "count"]).reset_index()
+                   .rename(columns={"sum": "responded", "count": "students"}))
+        st.dataframe(by_team, use_container_width=True)
+        with st.expander("Per-student status"):
+            st.dataframe(sdf, use_container_width=True, height=320)
+
+        nonresp = [r for r in status if not r["responded"]]
+        if nonresp:
+            st.download_button("⬇ non-responders.csv",
+                               pd.DataFrame(nonresp).to_csv(index=False),
+                               f"{slug}_nonresponders.csv", "text/csv")
+            with st.expander("Send a reminder to non-responders"):
+                base_url = st.text_input("Public app URL", cfg.public_url or "", key="rem_url")
+                subj = st.text_input("Subject",
+                                     "Reminder: your peer evaluation for {class}", key="rem_subj")
+                body = st.text_area("Body (HTML)", DEFAULT_INVITE_BODY, height=150, key="rem_body")
+                drafts_only = st.checkbox("Drafts only", value=(cfg.email.mode == "graph"),
+                                          key="rem_drafts")
+                if st.button("Send reminders", key="rem_go"):
+                    snap = survey.load_roster_snapshot(vault, slug) or {"teams": {}}
+                    teams = snap.get("teams", {})
+                    secret = survey.token_secret(cfg)
+                    msgs = []
+                    for r in nonresp:
+                        if not r["email"]:
+                            continue
+                        from peerparley.tokens import make_token
+                        tok = make_token({"s": slug, "t": r["team"], "p": r["pos"]}, secret)
+                        sep = "&" if "?" in base_url else "?"
+                        link = f"{base_url}{sep}t={tok}" if base_url else f"?t={tok}"
+                        ctx = {"first_name": r["name"].split(" ")[0], "name": r["name"],
+                               "team": r["team"], "eval_no": eval_no, "class": course, "link": link}
+                        msgs.append(mail.Message(
+                            to_email=r["email"], to_name=r["name"], team=r["team"],
+                            subject=mail.render_template(subj, ctx),
+                            body=mail.render_template(body, ctx), attachments=[]))
+                    _deliver(msgs, drafts_only, ok_label="Reminders delivered")
+
+        st.divider()
+        st.markdown("##### Grade the collected responses")
+        st.caption("Pulls every submission, turns it into the grading input, and hands "
+                   "it to the Review / PDF / Email tabs — no Qualtrics upload needed.")
+        if st.button("⬇ Load responses into grading", type="primary"):
+            long_df = survey.responses_to_long(vault, slug)
+            if long_df.empty:
+                st.warning("No responses collected yet.")
+            else:
+                S["long_df"] = long_df
+                snap = survey.load_roster_snapshot(vault, slug)
+                S["roster"] = survey.roster_for_matching(snap)
+                st.success(f"Loaded {len(long_df)} evaluation rows from {got} submission(s). "
+                           "Open **5 · Review & PDFs** to grade, then **6 · Email**.")
+
+# =========================================================================== #
+# TAB 3 — Upload & map  (optional Qualtrics fallback)
+# =========================================================================== #
+with tabs[2]:
     st.subheader("Upload Qualtrics export + roster")
+    st.caption("Optional — only if you collected responses in Qualtrics instead of the "
+               "built-in survey. Otherwise use tabs 1–2.")
     c1, c2 = st.columns(2)
     with c1:
         eval_file = st.file_uploader("Peer evaluation export (CSV/XLSX)",
@@ -120,20 +342,20 @@ with tabs[0]:
 
         st.markdown("##### Data-quality check")
         qa = ingest.data_quality_report(long_df, S.get("roster"))
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Eval rows", qa.get("rows", 0))
-        m2.metric("Evaluators", qa.get("evaluators", 0))
-        m3.metric("Teams", qa.get("teams", 0))
-        m4.metric("Unmatched names", qa.get("unmatched_names", 0))
+        mm1, mm2, mm3, mm4 = st.columns(4)
+        mm1.metric("Eval rows", qa.get("rows", 0))
+        mm2.metric("Evaluators", qa.get("evaluators", 0))
+        mm3.metric("Teams", qa.get("teams", 0))
+        mm4.metric("Unmatched names", qa.get("unmatched_names", 0))
         for issue in qa.get("issues", []):
             st.write("• " + issue)
         with st.expander("Preview tidy rows"):
             st.dataframe(long_df.head(50), use_container_width=True)
 
 # =========================================================================== #
-# TAB 2 — Configure grading
+# TAB 4 — Configure grading
 # =========================================================================== #
-with tabs[1]:
+with tabs[3]:
     st.subheader("Grading settings")
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -177,12 +399,12 @@ with tabs[1]:
     )
 
 # =========================================================================== #
-# TAB 3 — Review + PDFs
+# TAB 5 — Review + PDFs
 # =========================================================================== #
-with tabs[2]:
+with tabs[4]:
     st.subheader("Results & deliverables")
     if "long_df" not in S:
-        st.info("Upload data in step 1 first.")
+        st.info("Load responses in step 2 (or upload in step 3) first.")
     else:
         settings = S.get("settings", GradeSettings())
         teams = compute(S["long_df"], settings)
@@ -230,12 +452,12 @@ with tabs[2]:
                     _render_pdf(pdf)
 
 # =========================================================================== #
-# TAB 4 — Email
+# TAB 6 — Email
 # =========================================================================== #
-with tabs[3]:
+with tabs[5]:
     st.subheader("Email delivery")
     if "teams" not in S:
-        st.info("Compute results in step 3 first.")
+        st.info("Compute results in step 5 first.")
     else:
         default_subject = "Your peer evaluation feedback — Eval {eval_no}"
         default_body = (
@@ -287,9 +509,9 @@ with tabs[3]:
                 st.dataframe(pd.DataFrame(result["failed"]))
 
 # =========================================================================== #
-# TAB 5 — Vault (encrypted save / load behind the firewall)
+# TAB 7 — Vault (encrypted save / load behind the firewall)
 # =========================================================================== #
-with tabs[4]:
+with tabs[6]:
     st.subheader("Encrypted vault — behind the firewall")
     st.caption("Bundles are AES-encrypted locally, then written to "
                f"**{cfg.vault.backend}**. The cloud host never stores plaintext PII.")
@@ -322,7 +544,7 @@ with tabs[4]:
             try:
                 df = decrypt_dataframe(vault.get_bytes(pick))
                 S["long_df"] = df
-                st.success(f"Loaded `{pick}` ({len(df)} rows). Go to step 3 to recompute.")
+                st.success(f"Loaded `{pick}` ({len(df)} rows). Go to step 5 to recompute.")
             except Exception as exc:
                 st.error(f"Load failed: {exc}")
 

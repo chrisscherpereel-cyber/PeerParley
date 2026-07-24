@@ -51,6 +51,11 @@ class EmailConfig:
 class AppConfig:
     app_password_sha256: str = ""
     fernet_key: str = ""
+    # Built-in survey: secret that signs student links, and the public app URL
+    # used to build them. token_secret is optional — survey.token_secret()
+    # derives a stable fallback from fernet_key when it's blank.
+    token_secret: str = ""
+    public_url: str = ""
     vault: VaultConfig = field(default_factory=VaultConfig)
     email: EmailConfig = field(default_factory=EmailConfig)
     m365: Dict[str, Any] = field(default_factory=dict)
@@ -78,6 +83,8 @@ def load_config() -> AppConfig:
     return AppConfig(
         app_password_sha256=str(_get(None, "app_password_sha256", "")),
         fernet_key=str(_get(None, "fernet_key", "")),
+        token_secret=str(_get(None, "token_secret", "")),
+        public_url=str(_get(None, "public_url", "")),
         vault=VaultConfig(backend=backend, folder=folder, options=dict(options)),
         email=email,
         m365=dict(m365),
