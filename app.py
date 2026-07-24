@@ -489,6 +489,7 @@ with tabs[1]:
                 st.warning("No responses collected yet.")
             else:
                 S["long_df"] = long_df
+                S["self_evals"] = survey.self_evaluations(vault, slug)
                 snap = survey.load_roster_snapshot(vault, slug)
                 S["roster"] = survey.roster_for_matching(snap)
                 st.success(f"Loaded {len(long_df)} evaluation rows from {got} submission(s). "
@@ -539,6 +540,7 @@ with tabs[2]:
 
         long_df = ingest.to_long(df, cm, S.get("roster"))
         S["long_df"] = long_df
+        S["self_evals"] = {}          # Qualtrics export carries no self-rating block here
 
         st.markdown("##### Data-quality check")
         qa = ingest.data_quality_report(long_df, S.get("roster"))
@@ -607,7 +609,7 @@ with tabs[4]:
         st.info("Load responses in step 2 (or upload in step 3) first.")
     else:
         settings = S.get("settings", GradeSettings())
-        teams = compute(S["long_df"], settings)
+        teams = compute(S["long_df"], settings, self_evals=S.get("self_evals"))
         S["teams"] = teams
         if not teams:
             st.warning("No teams computed — check the team column mapping.")
