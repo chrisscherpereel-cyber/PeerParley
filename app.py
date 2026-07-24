@@ -261,24 +261,66 @@ with tabs[0]:
             st.warning(f"{len(no_email)} student(s) have no email and can't be sent a "
                        "link: " + ", ".join(no_email[:8]) + ("…" if len(no_email) > 8 else ""))
 
-    cur = S.get("survey_cfg") or dict(survey.DEFAULT_SURVEY)
-    with st.expander("Survey wording & options"):
-        cur["title"] = st.text_input("Title", cur["title"])
-        cur["intro"] = st.text_area("Intro (markdown)", cur["intro"], height=90)
-        cur["points_total"] = int(st.number_input("Points each student allocates",
-                                                   10, 1000, int(cur["points_total"]), 10))
-        cur["ask_public_comment"] = st.checkbox("Ask for a comment on each teammate",
-                                                value=cur["ask_public_comment"])
-        cur["public_comment_prompt"] = st.text_input("Comment prompt",
-                                                     cur["public_comment_prompt"])
-        cur["ask_confidential"] = st.checkbox("Ask for a confidential note to the instructor",
+    cur = {**survey.DEFAULT_SURVEY, **(S.get("survey_cfg") or {})}
+
+    with st.expander("Questions — turn each on or off"):
+        st.caption("Modelled on the MGT 301 peer evaluation. Switch any block off and "
+                   "students won't see it.")
+        cur["ask_ratings"] = st.checkbox("Rating matrix — 4 statements, 7-point agree/disagree",
+                                         value=cur["ask_ratings"])
+        cur["ask_improve"] = st.checkbox("Qualitative — how to increase their contribution",
+                                         value=cur["ask_improve"])
+        cur["ask_contribution"] = st.checkbox("Qualitative — their most significant contributions",
+                                              value=cur["ask_contribution"])
+        cur["ask_ranking"] = st.checkbox("Forced ranking — High / Adequate / Low performer",
+                                         value=cur["ask_ranking"])
+        cur["ask_allocation"] = st.checkbox("Pay allocation — split $100 across the team",
+                                            value=cur["ask_allocation"])
+        cur["ask_self_contribution"] = st.checkbox("Your own contribution — free text",
+                                                   value=cur["ask_self_contribution"])
+        cur["ask_confidential"] = st.checkbox("Confidential note to the instructor",
                                               value=cur["ask_confidential"])
-        cur["confidential_prompt"] = st.text_input("Confidential prompt",
-                                                   cur["confidential_prompt"])
-        cur["is_open"] = st.toggle("Accept submissions (master switch)",
-                                   value=cur["is_open"],
-                                   help="Turn off to close the survey immediately, "
-                                        "regardless of the dates below.")
+        cur["show_header"] = st.checkbox("Header — name, class, section, team-member list",
+                                         value=cur["show_header"])
+        if not cur["ask_allocation"]:
+            st.warning("With pay allocation off, the $ peer-ratio can't be computed — grade "
+                       "adjustments will be flat. Leave it on unless you have a reason.")
+        if not (cur["ask_improve"] or cur["ask_contribution"]):
+            st.warning("With both qualitative questions off, the written-comment score Q is "
+                       "empty and won't affect grades.")
+
+    with st.expander("Wording"):
+        cur["title"] = st.text_input("Title", cur["title"])
+        cur["intro"] = st.text_area("Intro (markdown)", cur["intro"], height=80)
+        if cur["ask_ratings"]:
+            cur["ratings_prompt"] = st.text_input("Rating-matrix prompt", cur["ratings_prompt"])
+            _sts = list(cur.get("rating_statements") or survey.RATING_STATEMENTS)
+            _sts += [""] * (4 - len(_sts))
+            for _k in range(4):
+                _sts[_k] = st.text_input(f"Statement {_k + 1}", _sts[_k], key=f"stmt_{_k}")
+            cur["rating_statements"] = [s for s in _sts if s.strip()]
+        if cur["ask_improve"]:
+            cur["improve_prompt"] = st.text_input(
+                "‘Increase contribution’ prompt (use {member} for the name)", cur["improve_prompt"])
+        if cur["ask_contribution"]:
+            cur["contribution_prompt"] = st.text_input(
+                "‘Most significant contributions’ prompt (use {member})", cur["contribution_prompt"])
+        if cur["ask_ranking"]:
+            cur["ranking_prompt"] = st.text_input("Forced-ranking prompt", cur["ranking_prompt"])
+        if cur["ask_allocation"]:
+            cur["allocation_prompt"] = st.text_input("Pay-allocation prompt", cur["allocation_prompt"])
+            cur["points_total"] = int(st.number_input("Dollars to allocate", 10, 1000,
+                                                       int(cur["points_total"]), 10))
+        if cur["ask_self_contribution"]:
+            cur["self_contribution_prompt"] = st.text_input("Your-contribution prompt",
+                                                           cur["self_contribution_prompt"])
+        if cur["ask_confidential"]:
+            cur["confidential_prompt"] = st.text_input("Confidential-note prompt",
+                                                       cur["confidential_prompt"])
+
+    cur["is_open"] = st.toggle("Accept submissions (master switch)", value=cur["is_open"],
+                               help="Turn off to close the survey immediately, regardless "
+                                    "of the dates below.")
 
     with st.expander("Schedule — open / close dates (optional)"):
         st.caption(f"App server clock right now: **{dt.datetime.now():%b %d, %Y %I:%M %p}**. "

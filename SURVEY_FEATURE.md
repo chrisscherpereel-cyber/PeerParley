@@ -11,19 +11,92 @@ uses. The Qualtrics upload path is still there as a fallback.
 | File | Change |
 |---|---|
 | `peerparley/tokens.py` | **new** — signed, tamper-proof student-link tokens (HMAC-SHA256). |
-| `peerparley/survey.py` | **new** — survey config, roster snapshot, encrypted storage of the survey/roster/responses in the vault, link generation, `responses → long_df`, and the public student form. |
-| `peerparley/config.py` | added optional `token_secret` and `public_url` secrets. |
-| `app.py` | student-link interceptor (before the login gate) + two new tabs. |
+| `peerparley/survey.py` | **new** — survey config + open/close schedule, roster snapshot with **owner**, encrypted storage of survey/roster/responses, link generation, `responses → long_df`, survey listing + access checks, and the public student form. |
+| `peerparley/accounts.py` | **new** — multi-instructor accounts (PBKDF2 hashes in the vault), roles, and a shared-password break-glass admin. |
+| `peerparley/auth.py` | **modified** — per-user username/password login (replaces the single shared-password gate; the old password still works as admin). |
+| `peerparley/config.py` | **modified** — added optional `token_secret` and `public_url`. |
+| `app.py` | **modified** — student-link interceptor, two new tabs, user-aware sidebar with a survey picker + admin user panel, ownership enforcement, delivery-method pickers, and CSV downloads. |
 
 Nothing in `grading.py`, `pdfgen.py`, `email_delivery.py`, `vault.py`, or
 `security.py` changed. No new dependencies — `requirements.txt` is unchanged.
 
+## The survey (matches the Qualtrics instrument)
+
+The student form is modelled on the MGT 301 peer evaluation, block for block, and
+every student evaluates **each teammate and themselves**:
+
+1. **Header** — name, class, section, team, and the list of members being evaluated.
+2. **Rating matrix** — four statements on a 7-point *Strongly agree → Strongly
+   disagree* scale (team player · did their share · quality of work · team
+   performed well because of them).
+3. **Qualitative** — two anonymous questions per member: how to *increase* their
+   contribution, and their *most significant* contribution.
+4. **Forced ranking** — each member into High / Adequate / Low performer (every
+   category used at least once).
+5. **Pay allocation** — split $100 across the team.
+6. **Your contribution** — free text, released to the team anonymously.
+7. **Confidential note** — to the instructor, never released.
+
+**The instructor turns any block on or off** in Survey setup → *Questions*, and
+edits every prompt and the four statements in → *Wording*. Nothing is
+pre-selected on the rating/ranking questions, so an unanswered item is caught
+rather than silently recorded as neutral.
+
+> **Grading note.** The grade still comes from the **$100 allocation** (peer
+> ratio) and the **written comments** (comment-support score Q), exactly as the
+> engine works today — the collected ratings and forced ranking are **stored
+> encrypted** with each response for the record and export, but the current
+> `grading.py` doesn't fold them into the score. Wiring ratings/ranking into the
+> grade and the PDFs is a clean follow-up if you want it.
+
+## Multiple instructors, per-section visibility
+
+Several instructors share one deployment. Each signs in with their **own
+username and password** (stored as salted PBKDF2 hashes in the vault, never in
+plaintext). Every survey is stamped with an **owner**:
+
+- **Instructors** see and administer only the sections they own — the sidebar
+  survey picker lists just theirs, and another instructor's responses are
+  blocked with a notice.
+- **Administrators** see and administer **every** instructor's sections, and get
+  a **👥 Manage instructors** panel in the sidebar to add accounts, reset
+  passwords, change roles, deactivate, or remove them.
+
+The app's original shared password (`app_password_sha256`) still works — it signs
+you in as a built-in **admin** called `admin`, so nothing breaks and you can't be
+locked out. Sign in with it first, then add instructors. New accounts get a
+temporary password and must set their own on first sign-in.
+
+## CSV everywhere (send it yourself)
+
+Both sides can be exported instead of emailed from the app:
+
+- **Invitations** — `links.csv` (every student's name, email, and personal link)
+  in the Survey setup tab.
+- **Results** — `recipients.csv` (name, email, rendered subject/body, and the
+  individual PDF filename) in the Email tab, alongside the grades CSV in Review &
+  PDFs and the PDF bundle. Download those and mail-merge them yourself.
+
 ## The two new tabs
 
 **1 · Survey setup** — upload the contact list, edit the survey wording and the
-points total, toggle the survey open/closed, and **Save survey + roster to
-vault**. Then generate every student's personal link and email them via the
-app's existing Microsoft 365 / SMTP mailer (dry-run drafts or live send).
+points total, set an **open/close schedule** (or use the master on/off switch),
+and **Save survey + roster to vault**. A status line shows whether the survey is
+Open / Scheduled / Closed for students right now. Then generate every student's
+personal link and either email it or download **links.csv** for your own mail
+merge.
+
+**Open / close dates.** The survey config carries optional `opens_at` /
+`closes_at` datetimes (app-server clock). Before the open date the student form
+says "opens on…"; after the close date it says "closed"; submissions are blocked
+outside the window (re-checked on submit, so a deadline that passes mid-session
+still holds). The master switch closes it instantly regardless of dates.
+
+**Email is not tied to Microsoft 365.** Every send point (invitations,
+reminders, and the results Email tab) has a **Send via** picker — *Microsoft 365
+(Graph)* or *SMTP server* (Gmail/NAU/etc., credentials from `[email]` secrets) —
+plus a no-server path: download `links.csv` for invites, or the PDF bundle for
+results, and send them yourself.
 
 **2 · Responses** — response counts overall and per team, a non-responder list
 you can download or email a reminder to, and **Load responses into grading**,
