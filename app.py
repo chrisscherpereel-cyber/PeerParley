@@ -14,6 +14,7 @@ directly (see peerparley/survey.py), bypassing the instructor password gate.
 """
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import io
 import zipfile
@@ -99,13 +100,35 @@ DEFAULT_INVITE_BODY = (
 )
 
 
-def _deliver(messages, drafts_only, ok_label="Done"):
+EMAIL_METHODS = [("graph", "Microsoft 365 (Graph)"), ("smtp", "SMTP server (Gmail, NAU, …)")]
+
+
+def _mailer_for(method):
+    """Build a mailer for the chosen method, overriding the secrets default."""
+    c = dataclasses.replace(cfg, email=dataclasses.replace(cfg.email, mode=method))
+    return _make_mailer(c)
+
+
+def _method_selector(key):
+    """A 'Send via' picker; defaults to the secrets email.mode."""
+    keys = [k for k, _ in EMAIL_METHODS]
+    labels = {k: v for k, v in EMAIL_METHODS}
+    default = cfg.email.mode if cfg.email.mode in labels else "graph"
+    m = st.selectbox("Send via", keys, index=keys.index(default),
+                     format_func=lambda k: labels[k], key=key)
+    if m == "smtp":
+        st.caption("SMTP reads host/port/username/password from your secrets "
+                   "([email] mode/smtp_*). Nothing is typed here.")
+    return m
+
+
+def _deliver(messages, method, drafts_only, ok_label="Done"):
     """Shared send routine for invite/reminder emails (reuses the app mailer)."""
     if not messages:
         st.warning("No recipients with an email address.")
         return
     st.write(f"Prepared {len(messages)} message(s).")
-    mailer = _make_mailer(cfg)
+    mailer = _mailer_for(method)
     if mailer is None:
         return
     prog = st.progress(0.0)
@@ -174,9 +197,39 @@ with tabs[0]:
                                               value=cur["ask_confidential"])
         cur["confidential_prompt"] = st.text_input("Confidential prompt",
                                                    cur["confidential_prompt"])
-        cur["is_open"] = st.toggle("Survey is OPEN (students can submit)",
-                                   value=cur["is_open"])
+        cur["is_open"] = st.toggle("Accept submissions (master switch)",
+                                   value=cur["is_open"],
+                                   help="Turn off to close the survey immediately, "
+                                        "regardless of the dates below.")
+
+    with st.expander("Schedule — open / close dates (optional)"):
+        st.caption(f"App server clock right now: **{dt.datetime.now():%b %d, %Y %I:%M %p}**. "
+                   "Dates below use this clock — set them relative to it.")
+        use_open = st.checkbox("Set an OPEN date", value=bool(cur.get("opens_at")))
+        if use_open:
+            _o = survey.parse_dt(cur.get("opens_at")) or dt.datetime.now()
+            co1, co2 = st.columns(2)
+            od = co1.date_input("Opens on", _o.date(), key="open_d")
+            ot = co2.time_input("Opens at", _o.time().replace(microsecond=0), key="open_t")
+            cur["opens_at"] = dt.datetime.combine(od, ot).isoformat()
+        else:
+            cur["opens_at"] = ""
+        use_close = st.checkbox("Set a CLOSE date", value=bool(cur.get("closes_at")))
+        if use_close:
+            _c = survey.parse_dt(cur.get("closes_at")) or (dt.datetime.now() + dt.timedelta(days=7))
+            cc1, cc2 = st.columns(2)
+            cd = cc1.date_input("Closes on", _c.date(), key="close_d")
+            ct = cc2.time_input("Closes at", _c.time().replace(microsecond=0), key="close_t")
+            cur["closes_at"] = dt.datetime.combine(cd, ct).isoformat()
+        else:
+            cur["closes_at"] = ""
     S["survey_cfg"] = cur
+
+    _state = survey.window_state(cur)
+    _badge = {"open": "🟢 Open", "not_yet": "🟡 Scheduled — not open yet",
+              "closed": "🔴 Closed (past the close date)",
+              "disabled": "🔴 Closed (master switch off)"}[_state]
+    st.caption(f"Current status for students: **{_badge}** · {survey.window_message(cur)}")
 
     if st.button("💾 Save survey + roster to vault", type="primary", disabled=cdf is None):
         try:
@@ -201,11 +254,15 @@ with tabs[0]:
             st.dataframe(links_df, use_container_width=True, height=280)
             st.download_button("⬇ links.csv", links_df.to_csv(index=False),
                                f"{slug}_links.csv", "text/csv")
+        st.caption("No mail server? Skip this and just use the **links.csv** above — "
+                   "it has every student's link for your own mail merge.")
         subj = st.text_input("Email subject",
                              "Your peer evaluation for {class} (Eval {eval_no})", key="inv_subj")
         body = st.text_area("Email body (HTML)", DEFAULT_INVITE_BODY, height=180, key="inv_body")
+        inv_method = _method_selector("inv_method")
         drafts_only = st.checkbox("Create Outlook drafts only (no send)",
-                                  value=(cfg.email.mode == "graph"), key="inv_drafts")
+                                  value=(inv_method == "graph"), key="inv_drafts",
+                                  disabled=(inv_method != "graph"))
         if st.button("Build & deliver links", key="inv_go"):
             if not base_url.strip():
                 st.error("Enter the public app URL first, or the links won't point anywhere.")
@@ -221,7 +278,8 @@ with tabs[0]:
                         to_email=r["email"], to_name=r["name"], team=r["team"],
                         subject=mail.render_template(subj, ctx),
                         body=mail.render_template(body, ctx), attachments=[]))
-                _deliver(msgs, drafts_only, ok_label="Links delivered")
+                _deliver(msgs, inv_method, drafts_only and inv_method == "graph",
+                         ok_label="Links delivered")
 
 # =========================================================================== #
 # TAB 2 — Responses (monitor + load into grading)
@@ -238,6 +296,12 @@ with tabs[1]:
         m1, m2 = st.columns(2)
         m1.metric("Responded", f"{got} / {len(status)}")
         m2.metric("Outstanding", len(status) - got)
+
+        _svy = survey.load_survey(vault, slug)
+        _st = survey.window_state(_svy)
+        _badge = {"open": "🟢 Open", "not_yet": "🟡 Not open yet",
+                  "closed": "🔴 Closed", "disabled": "🔴 Closed (switch off)"}[_st]
+        st.caption(f"Survey status: **{_badge}** · {survey.window_message(_svy)}")
 
         sdf = pd.DataFrame(status)
         by_team = (sdf.groupby("team")["responded"]
@@ -257,8 +321,9 @@ with tabs[1]:
                 subj = st.text_input("Subject",
                                      "Reminder: your peer evaluation for {class}", key="rem_subj")
                 body = st.text_area("Body (HTML)", DEFAULT_INVITE_BODY, height=150, key="rem_body")
-                drafts_only = st.checkbox("Drafts only", value=(cfg.email.mode == "graph"),
-                                          key="rem_drafts")
+                rem_method = _method_selector("rem_method")
+                drafts_only = st.checkbox("Drafts only", value=(rem_method == "graph"),
+                                          key="rem_drafts", disabled=(rem_method != "graph"))
                 if st.button("Send reminders", key="rem_go"):
                     snap = survey.load_roster_snapshot(vault, slug) or {"teams": {}}
                     teams = snap.get("teams", {})
@@ -277,7 +342,8 @@ with tabs[1]:
                             to_email=r["email"], to_name=r["name"], team=r["team"],
                             subject=mail.render_template(subj, ctx),
                             body=mail.render_template(body, ctx), attachments=[]))
-                    _deliver(msgs, drafts_only, ok_label="Reminders delivered")
+                    _deliver(msgs, rem_method, drafts_only and rem_method == "graph",
+                             ok_label="Reminders delivered")
 
         st.divider()
         st.markdown("##### Grade the collected responses")
@@ -477,11 +543,12 @@ with tabs[5]:
             st.write("**Subject:** " + mail.render_template(subject_t, ctx))
             st.markdown(mail.render_template(body_t, ctx), unsafe_allow_html=True)
 
-        mode = cfg.email.mode
-        st.caption(f"Delivery mode from secrets: **{mode}**")
+        st.caption("Prefer not to email from the app? Build the PDF bundle on the "
+                   "**Review & PDFs** tab and send the files yourself.")
+        method = _method_selector("results_method")
         colx, coly = st.columns(2)
         drafts_only = colx.checkbox("Create Outlook drafts only (no send)",
-                                    value=(mode == "graph"))
+                                    value=(method == "graph"), disabled=(method != "graph"))
         go = coly.button("Build messages & deliver", type="primary")
 
         if go:
@@ -489,9 +556,10 @@ with tabs[5]:
             messages = _build_messages(S["teams"], roster, subject_t, body_t,
                                        attach_team, course, eval_no)
             st.write(f"Prepared {len(messages)} messages.")
-            mailer = _make_mailer(cfg)
+            mailer = _mailer_for(method)
             if mailer is None:
                 st.stop()
+            drafts_only = drafts_only and method == "graph"
             prog = st.progress(0.0)
             log = st.empty()
             lines = []
