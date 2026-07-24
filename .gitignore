@@ -1,0 +1,32 @@
+# ── Secrets — NEVER commit ────────────────────────────────────────────────
+# Fernet key, app password hash, M365 / Dropbox / pCloud vault credentials.
+.streamlit/secrets.toml
+
+# ── Encrypted student data (the "behind the firewall" cache) ──────────────
+# Local vault backend writes here: survey config, roster snapshots, and every
+# student response. Even though it's encrypted, it's student-record data.
+vault_cache/
+*.ppx        # encrypted dataset bundles
+*.ppj        # survey / roster / response blobs
+
+# ── Raw student data & generated deliverables ─────────────────────────────
+*.csv
+*.xlsx
+*.xls
+*.pdf
+*.zip
+
+# ── Python / environment ──────────────────────────────────────────────────
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# ── OS cruft ──────────────────────────────────────────────────────────────
+.DS_Store
+
+# ── Keep these (explicitly not ignored) ───────────────────────────────────
+!.streamlit/config.toml
+!.streamlit/secrets.toml.example
+!requirements.txt
