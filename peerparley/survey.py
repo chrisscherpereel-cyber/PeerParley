@@ -47,9 +47,56 @@ DEFAULT_SURVEY: Dict = {
     "public_comment_prompt": "What did this teammate do well, or where could they improve?",
     "ask_confidential": True,
     "confidential_prompt": "Anything you'd like to share privately with the instructor? (optional)",
-    "is_open": True,
+    "is_open": True,          # master switch — off = closed regardless of dates
+    "opens_at": "",           # ISO datetime; blank = open as soon as is_open is on
+    "closes_at": "",          # ISO datetime; blank = no automatic close
     "closed_note": "This peer evaluation is now closed. Thank you.",
 }
+
+
+# --------------------------------------------------------------------------- #
+# Open / close scheduling
+# --------------------------------------------------------------------------- #
+def parse_dt(value):
+    """Parse an ISO datetime string into a naive datetime, or None."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except Exception:
+        return None
+
+
+def window_state(survey_cfg: Dict):
+    """Return one of 'open', 'not_yet', 'closed', 'disabled' for the survey now.
+
+    Times are compared against the app server's clock (datetime.now()). The
+    master `is_open` switch, when off, closes the survey regardless of dates.
+    """
+    if not survey_cfg.get("is_open", True):
+        return "disabled"
+    now = datetime.now()
+    opens = parse_dt(survey_cfg.get("opens_at"))
+    closes = parse_dt(survey_cfg.get("closes_at"))
+    if opens and now < opens:
+        return "not_yet"
+    if closes and now > closes:
+        return "closed"
+    return "open"
+
+
+def window_message(survey_cfg: Dict) -> str:
+    """A student-facing sentence describing the current window."""
+    state = window_state(survey_cfg)
+    if state == "not_yet":
+        opens = parse_dt(survey_cfg.get("opens_at"))
+        return (f"This peer evaluation opens on {opens:%b %d, %Y at %I:%M %p}. "
+                "Please come back then.") if opens else "This peer evaluation isn't open yet."
+    if state in ("closed", "disabled"):
+        return survey_cfg.get("closed_note", "This peer evaluation is now closed. Thank you.")
+    closes = parse_dt(survey_cfg.get("closes_at"))
+    return (f"Open now — closes {closes:%b %d, %Y at %I:%M %p}." if closes
+            else "Open now.")
 
 
 # --------------------------------------------------------------------------- #
@@ -359,9 +406,15 @@ def render_student_app(token: str) -> None:
     st.header(survey.get("title", "Peer Evaluation"))
     st.caption(f"{snap.get('course', '')} · Evaluation {snap.get('eval_no', '')}")
 
-    if not survey.get("is_open", True):
-        st.warning(survey.get("closed_note", "This peer evaluation is closed."))
+    state = window_state(survey)
+    if state != "open":
+        if state == "not_yet":
+            st.info(window_message(survey))
+        else:
+            st.warning(window_message(survey))
         return
+    if parse_dt(survey.get("closes_at")):
+        st.caption(window_message(survey))
 
     st.markdown(survey.get("intro", ""))
     total = int(survey.get("points_total", 100))
@@ -396,6 +449,9 @@ def render_student_app(token: str) -> None:
         submitted = st.form_submit_button("Submit evaluation", type="primary")
 
     if submitted:
+        if window_state(survey) != "open":
+            st.warning(window_message(survey))
+            return
         running = sum(int(v) for v in allocs.values())
         if running != total:
             st.error(f"Your points add up to {running}, but must total exactly {total}. "
