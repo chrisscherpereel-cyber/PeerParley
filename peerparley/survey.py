@@ -37,16 +37,67 @@ from .vault import Vault
 # --------------------------------------------------------------------------- #
 # Survey definition
 # --------------------------------------------------------------------------- #
+SCALE_LABELS = ["Strongly agree", "Agree", "Somewhat agree",
+                "Neither agree nor disagree", "Somewhat disagree",
+                "Disagree", "Strongly disagree"]  # 7 → 1
+
+RATING_STATEMENTS = [
+    "I consider him/her a team player.",
+    "He/she did his/her share of the work on the team.",
+    "He/she contributed high quality of work to the team.",
+    "The team performed well because of this individual.",
+]
+
+RANK_CATEGORIES = ["High Performer", "Adequate Performer", "Low Performer"]
+
 DEFAULT_SURVEY: Dict = {
     "title": "Peer Evaluation",
-    "intro": ("Rate your teammates by splitting **100 points** across them — give "
-              "more points to those who contributed more. Add a short comment for "
-              "each teammate, and an optional confidential note to the instructor."),
+    "intro": ("You will evaluate each member of your team — including yourself. "
+              "For each person, rate the statements, add brief anonymous feedback, "
+              "rank their contribution, and split $100 across the team."),
+
+    # ---- Introduction / header ----
+    "show_header": True,
+
+    # ---- Rating matrix (4 statements, 7-point agree/disagree) ----
+    "ask_ratings": True,
+    "ratings_prompt": ("For each team member (including yourself) please indicate the "
+                       "degree to which you disagree or agree with the following statements."),
+    "rating_statements": list(RATING_STATEMENTS),
+    "scale_labels": list(SCALE_LABELS),
+
+    # ---- Qualitative feedback (two questions per member) ----
+    "ask_improve": True,
+    "improve_prompt": ("If you were {member}, what specific things would you do to "
+                       "increase your contribution to the team? (Shared anonymously.)"),
+    "ask_contribution": True,
+    "contribution_prompt": ("If you were {member}, what would you identify as your most "
+                            "significant contributions to the team? (Shared anonymously.)"),
+
+    # ---- Forced ranking ----
+    "ask_ranking": True,
+    "ranking_prompt": ("Rank each team member's contribution to the team's performance, "
+                       "including yourself. Use every category at least once."),
+    "ranking_categories": list(RANK_CATEGORIES),
+
+    # ---- Pay allocation ----
+    "ask_allocation": True,
+    "allocation_prompt": ("You have been given $100 to pay your team for their contribution "
+                          "to the project. Allocate a portion to each member (consider both "
+                          "performance and effort). It must total exactly $100."),
     "points_total": 100,
-    "ask_public_comment": True,
-    "public_comment_prompt": "What did this teammate do well, or where could they improve?",
+
+    # ---- Your own contribution (released anonymously) ----
+    "ask_self_contribution": True,
+    "self_contribution_prompt": ("Briefly describe YOUR significant contributions to the "
+                                 "team's performance. (Shared anonymously.)"),
+
+    # ---- Confidential note to the instructor ----
     "ask_confidential": True,
-    "confidential_prompt": "Anything you'd like to share privately with the instructor? (optional)",
+    "confidential_prompt": ("Any additional comments for the instructor about your team's "
+                            "performance? (Confidential — not released.)"),
+
+    # ---- Scheduling ----
     "is_open": True,          # master switch — off = closed regardless of dates
     "opens_at": "",           # ISO datetime; blank = open as soon as is_open is on
     "closes_at": "",          # ISO datetime; blank = no automatic close
@@ -182,7 +233,9 @@ def _contact_columns(df: pd.DataFrame):
     last = contains(["last name", "lastname", "last"])
     email = contains(["primaryemail", "email", "e-mail"])
     team = contains(["team", "group"])
-    return full, first, last, email, team
+    klass = exact(["class", "course", "class name"]) or contains(["class", "course"])
+    section = exact(["section", "sec"]) or contains(["section"])
+    return full, first, last, email, team, klass, section
 
 
 def build_teams(contact_df: pd.DataFrame) -> Dict[str, List[dict]]:
@@ -192,7 +245,7 @@ def build_teams(contact_df: pd.DataFrame) -> Dict[str, List[dict]]:
     A member record is {name, first, last, email}. Teams with fewer than two
     members are dropped — a student with no teammates has nothing to evaluate.
     """
-    full_c, first_c, last_c, email_c, team_c = _contact_columns(contact_df)
+    full_c, first_c, last_c, email_c, team_c, class_c, section_c = _contact_columns(contact_df)
     teams: Dict[str, List[dict]] = {}
     seen = set()
     for _, row in contact_df.iterrows():
@@ -216,6 +269,8 @@ def build_teams(contact_df: pd.DataFrame) -> Dict[str, List[dict]]:
             "first": first or name.split(" ")[0],
             "last": last or name.split(" ")[-1],
             "email": str(row.get(email_c, "")).strip() if email_c else "",
+            "class": str(row.get(class_c, "")).strip() if class_c else "",
+            "section": str(row.get(section_c, "")).strip() if section_c else "",
         })
     ordered = {}
     for team, members in teams.items():
@@ -376,9 +431,18 @@ def response_status(vault: Vault, slug: str) -> List[dict]:
     return rows
 
 
+def _num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
 def responses_to_long(vault: Vault, slug: str) -> pd.DataFrame:
     """Turn collected submissions into the tidy long-format the grader consumes:
-    one row per (evaluator -> evaluatee) with points + comments."""
+    one row per (evaluator -> evaluatee). Points come from the $100 allocation and
+    the public comment from the anonymous 'contribution' + 'improve' feedback.
+    Handles both the full survey payload (`members`) and the older flat payload."""
     snap = load_roster_snapshot(vault, slug)
     if not snap:
         return pd.DataFrame()
@@ -392,30 +456,43 @@ def responses_to_long(vault: Vault, slug: str) -> pd.DataFrame:
             continue
         evaluator = members[pos]["name"]
         ev_key = name_key(evaluator)
-        alloc = resp.get("alloc", {}) or {}
-        comments = resp.get("comments", {}) or {}
         conf = resp.get("confidential", "") or ""
+        member_ans = resp.get("members")
         first = True
-        for tpos_str, pts in alloc.items():
-            tpos = int(tpos_str)
-            if tpos == pos or tpos >= len(members):
-                continue
-            tname = members[tpos]["name"]
-            try:
-                pval = float(pts)
-            except (TypeError, ValueError):
-                pval = float("nan")
-            rows.append({
-                "evaluator": evaluator,
-                "evaluator_key": ev_key,
-                "evaluator_team": team,
-                "evaluatee": tname,
-                "evaluatee_key": name_key(tname),
-                "points": pval,
-                "public_comment": str(comments.get(tpos_str, "") or ""),
-                "confidential_comment": conf if first else "",
-            })
-            first = False
+
+        if member_ans:  # full survey design
+            for tpos_str, ans in member_ans.items():
+                tpos = int(tpos_str)
+                if tpos == pos or tpos >= len(members):
+                    continue
+                improve = str((ans or {}).get("improve", "") or "").strip()
+                contribution = str((ans or {}).get("contribution", "") or "").strip()
+                pub = " ".join(t for t in (contribution, improve) if t).strip()
+                rows.append({
+                    "evaluator": evaluator, "evaluator_key": ev_key,
+                    "evaluator_team": team, "evaluatee": members[tpos]["name"],
+                    "evaluatee_key": name_key(members[tpos]["name"]),
+                    "points": _num((ans or {}).get("alloc")),
+                    "public_comment": pub,
+                    "confidential_comment": conf if first else "",
+                })
+                first = False
+        else:  # legacy flat payload (alloc/comments)
+            alloc = resp.get("alloc", {}) or {}
+            comments = resp.get("comments", {}) or {}
+            for tpos_str, pts in alloc.items():
+                tpos = int(tpos_str)
+                if tpos == pos or tpos >= len(members):
+                    continue
+                rows.append({
+                    "evaluator": evaluator, "evaluator_key": ev_key,
+                    "evaluator_team": team, "evaluatee": members[tpos]["name"],
+                    "evaluatee_key": name_key(members[tpos]["name"]),
+                    "points": _num(pts),
+                    "public_comment": str(comments.get(tpos_str, "") or ""),
+                    "confidential_comment": conf if first else "",
+                })
+                first = False
     return pd.DataFrame.from_records(rows)
 
 
@@ -455,64 +532,147 @@ def render_student_app(token: str) -> None:
     me = members[pos]
 
     st.header(survey.get("title", "Peer Evaluation"))
-    st.caption(f"{snap.get('course', '')} · Evaluation {snap.get('eval_no', '')}")
+
+    # ---- Introduction / header --------------------------------------------
+    if survey.get("show_header", True):
+        klass = me.get("class") or snap.get("course", "")
+        section = me.get("section", "")
+        bits = [f"**{me['name']}**"]
+        if klass:
+            bits.append(f"Class: {klass}")
+        if section:
+            bits.append(f"Section: {section}")
+        bits.append(f"Team {team} · Evaluation {snap.get('eval_no', '')}")
+        st.caption("  ·  ".join(bits))
+        st.caption("You will evaluate the following team members (and yourself): "
+                   + ", ".join(m["name"] for m in members))
+    else:
+        st.caption(f"{snap.get('course', '')} · Evaluation {snap.get('eval_no', '')}")
 
     state = window_state(survey)
     if state != "open":
-        if state == "not_yet":
-            st.info(window_message(survey))
-        else:
-            st.warning(window_message(survey))
+        (st.info if state == "not_yet" else st.warning)(window_message(survey))
         return
     if parse_dt(survey.get("closes_at")):
         st.caption(window_message(survey))
+    if survey.get("intro"):
+        st.markdown(survey["intro"])
 
-    st.markdown(survey.get("intro", ""))
+    scale = survey.get("scale_labels") or SCALE_LABELS
+    statements = survey.get("rating_statements") or RATING_STATEMENTS
+    cats = survey.get("ranking_categories") or RANK_CATEGORIES
     total = int(survey.get("points_total", 100))
-    st.info(f"You are **{me['name']}** — Team {team}. Split **{total} points** across "
-            "your teammates (not yourself).")
-
-    teammates = [(i, m) for i, m in enumerate(members) if i != pos]
     prior = load_response(vault, slug, team, pos) or {}
-    ex_alloc = prior.get("alloc", {}) or {}
-    ex_comments = prior.get("comments", {}) or {}
+    pmembers = prior.get("members", {}) or {}
 
     with st.form("student_survey"):
-        allocs: Dict[str, int] = {}
-        comments: Dict[str, str] = {}
-        for i, m in teammates:
-            st.markdown(f"**{m['name']}**")
-            allocs[str(i)] = st.number_input(
-                f"Points to {m['name']}", min_value=0, max_value=total,
-                value=int(ex_alloc.get(str(i), 0)), step=1, key=f"alloc_{i}")
-            if survey.get("ask_public_comment", True):
-                comments[str(i)] = st.text_area(
-                    survey.get("public_comment_prompt", "Comment"),
-                    value=str(ex_comments.get(str(i), "")), key=f"cmt_{i}")
+        answers: Dict[str, dict] = {}
+
+        # ---- per-member: ratings + qualitative ----------------------------
+        for i, m in enumerate(members):
+            who = m["name"] + ("  (yourself)" if i == pos else "")
+            st.markdown(f"### {who}")
+            pa = pmembers.get(str(i), {}) or {}
+            entry: Dict = {}
+
+            if survey.get("ask_ratings", True):
+                if i == 0 or survey.get("ratings_prompt"):
+                    st.caption(survey.get("ratings_prompt", ""))
+                ex_r = pa.get("ratings") or [None] * len(statements)
+                rvals = []
+                for si, stmt in enumerate(statements):
+                    default_idx = None
+                    if si < len(ex_r) and ex_r[si]:
+                        try:
+                            default_idx = 7 - int(ex_r[si])
+                        except Exception:
+                            default_idx = None
+                    choice = st.selectbox(stmt, scale, index=default_idx,
+                                          placeholder="Select…", key=f"r_{i}_{si}")
+                    rvals.append((7 - scale.index(choice)) if choice in scale else None)
+                entry["ratings"] = rvals
+
+            if survey.get("ask_improve", True):
+                entry["improve"] = st.text_area(
+                    (survey.get("improve_prompt", "") or "").replace("{member}", m["name"]),
+                    value=str(pa.get("improve", "")), key=f"imp_{i}")
+            if survey.get("ask_contribution", True):
+                entry["contribution"] = st.text_area(
+                    (survey.get("contribution_prompt", "") or "").replace("{member}", m["name"]),
+                    value=str(pa.get("contribution", "")), key=f"con_{i}")
+            answers[str(i)] = entry
             st.divider()
+
+        # ---- forced ranking ----------------------------------------------
+        if survey.get("ask_ranking", True):
+            st.markdown("### Forced ranking")
+            st.caption(survey.get("ranking_prompt", ""))
+            for i, m in enumerate(members):
+                pa = pmembers.get(str(i), {}) or {}
+                exr = pa.get("rank")
+                who = m["name"] + ("  (yourself)" if i == pos else "")
+                choice = st.selectbox(who, cats,
+                                      index=(cats.index(exr) if exr in cats else None),
+                                      placeholder="Choose…", key=f"rank_{i}")
+                answers[str(i)]["rank"] = choice if choice in cats else None
+            st.divider()
+
+        # ---- pay allocation ----------------------------------------------
+        allocs: Dict[str, int] = {}
+        if survey.get("ask_allocation", True):
+            st.markdown("### Pay students")
+            st.caption(survey.get("allocation_prompt", ""))
+            for i, m in enumerate(members):
+                pa = pmembers.get(str(i), {}) or {}
+                who = m["name"] + ("  (yourself)" if i == pos else "")
+                allocs[str(i)] = st.number_input(who, min_value=0, max_value=total,
+                                                 value=int(pa.get("alloc", 0) or 0), step=1,
+                                                 key=f"alloc_{i}")
+                answers[str(i)]["alloc"] = allocs[str(i)]
+            st.caption(f"Total allocated: **${sum(int(v) for v in allocs.values())} / ${total}**")
+            st.divider()
+
+        # ---- your own contribution ---------------------------------------
+        self_contribution = ""
+        if survey.get("ask_self_contribution", True):
+            st.markdown("### Your contribution")
+            self_contribution = st.text_area(survey.get("self_contribution_prompt", ""),
+                                             value=str(prior.get("self_contribution", "")),
+                                             key="self_contrib")
+
+        # ---- confidential note -------------------------------------------
         conf = ""
         if survey.get("ask_confidential", True):
-            conf = st.text_area(survey.get("confidential_prompt",
-                                           "Confidential note to the instructor"),
-                                value=str(prior.get("confidential", "")))
-        running = sum(int(v) for v in allocs.values())
-        st.caption(f"Allocated so far: **{running} / {total}**")
+            st.markdown("### Confidential note to the instructor")
+            conf = st.text_area(survey.get("confidential_prompt", ""),
+                                value=str(prior.get("confidential", "")), key="conf_note")
+
         submitted = st.form_submit_button("Submit evaluation", type="primary")
 
     if submitted:
         if window_state(survey) != "open":
             st.warning(window_message(survey))
             return
-        running = sum(int(v) for v in allocs.values())
-        if running != total:
-            st.error(f"Your points add up to {running}, but must total exactly {total}. "
-                     "Please adjust and submit again.")
-            return
+        if survey.get("ask_allocation", True):
+            running = sum(int(v) for v in allocs.values())
+            if running != total:
+                st.error(f"Your $ allocations total ${running}, but must total exactly "
+                         f"${total}. Please adjust and submit again.")
+                return
+        if survey.get("ask_ranking", True):
+            ranks = [answers[str(i)].get("rank") for i in range(len(members))]
+            if any(r is None for r in ranks):
+                st.error("Please place every team member in a ranking category.")
+                return
+            if len(members) >= len(cats) and len(set(ranks)) < len(cats):
+                st.error("Use every ranking category at least once.")
+                return
         record = {
             "slug": slug, "team": team, "pos": pos,
             "evaluator": me["name"], "evaluator_key": name_key(me["name"]),
             "submitted": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "alloc": allocs, "comments": comments, "confidential": conf,
+            "members": answers, "self_contribution": self_contribution,
+            "confidential": conf,
         }
         try:
             save_response(vault, slug, team, pos, record)
