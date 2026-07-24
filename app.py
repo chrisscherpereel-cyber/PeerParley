@@ -23,6 +23,7 @@ import pandas as pd
 import streamlit as st
 
 from peerparley import __version__
+from peerparley import accounts
 from peerparley.auth import logout, require_login
 from peerparley.config import load_config
 from peerparley import ingest
@@ -75,18 +76,95 @@ if not require_login():
 
 cfg = load_config()
 S = st.session_state
+user = st.session_state.get("pp_user") or {"user": "admin", "name": "Administrator",
+                                           "role": "admin", "source": "secrets"}
+is_admin = accounts.is_admin(user)
 
 with st.sidebar:
-    st.caption(f"v{__version__}")
+    st.markdown(f"**{user.get('name', 'User')}**")
+    st.caption(f"`{user.get('user')}` · "
+               + ("administrator — every section" if is_admin
+                  else "instructor — your sections only"))
     ok, msg = Vault().healthcheck()
     (st.success if ok else st.warning)(msg)
-    st.caption(f"Storage backend: **{cfg.vault.backend}** · folder `{cfg.vault.folder}`")
+    st.caption(f"Storage: **{cfg.vault.backend}** · v{__version__}")
     if st.button("Sign out"):
         logout(); st.rerun()
 
-course = st.sidebar.text_input("Course / section", S.get("course", ""))
-eval_no = st.sidebar.text_input("Evaluation #", S.get("eval_no", "1"))
-S["course"], S["eval_no"] = course, eval_no
+    # ---- change my own password (vault accounts only) --------------------
+    if user.get("source") == "vault":
+        with st.expander("Change my password"):
+            p1 = st.text_input("New password", type="password", key="own_pw1")
+            p2 = st.text_input("Confirm", type="password", key="own_pw2")
+            if st.button("Save password", key="own_pw_save"):
+                if p1 != p2:
+                    st.error("Those don't match.")
+                elif len(p1) < 8:
+                    st.error("Use at least 8 characters.")
+                else:
+                    try:
+                        accounts.set_password(user["user"], p1, must_change=False)
+                        st.success("Changed.")
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(str(exc))
+
+    st.divider()
+    st.markdown("### Working on")
+    _all = survey.list_surveys()
+    _mine = survey.visible_surveys(_all, user)
+    _labels = [f"{(s['course'] or '(no course)')} · Eval {s['eval_no']}"
+               + (f" — {s['owner'] or 'unowned'}" if is_admin else "")
+               for s in _mine]
+    choice = st.selectbox("Survey", ["➕ New survey…"] + _labels, key="survey_pick")
+    if choice == "➕ New survey…":
+        course = st.text_input("Course / section", S.get("course", ""), key="new_course")
+        eval_no = st.text_input("Evaluation #", S.get("eval_no", "1"), key="new_eval")
+    else:
+        _s = _mine[_labels.index(choice)]
+        course, eval_no = _s["course"], str(_s["eval_no"])
+        st.caption(f"Editing **{course} · Eval {eval_no}**"
+                   + (f" · owner `{_s['owner'] or 'unowned'}`" if is_admin else ""))
+    S["course"], S["eval_no"] = course, eval_no
+
+    # ---- admin: manage instructor accounts -------------------------------
+    if is_admin:
+        st.divider()
+        with st.expander("👥 Manage instructors"):
+            accts = accounts.load_accounts()
+            st.caption(f"{len(accts)} stored account(s), plus the built-in `admin`.")
+            st.markdown("**Add an instructor**")
+            nu = st.text_input("Username", key="acct_new_user")
+            nn = st.text_input("Display name", key="acct_new_name")
+            nr = st.selectbox("Role", ["instructor", "admin"], key="acct_new_role")
+            npw = st.text_input("Temporary password", value="PeerParley-Welcome",
+                                key="acct_new_pw")
+            if st.button("Add instructor", key="acct_add"):
+                try:
+                    accounts.add_account(nu, nn, nr, npw or "PeerParley-Welcome")
+                    st.success(f"Added `{nu}`. Give them username `{nu}` and password "
+                               f"`{npw or 'PeerParley-Welcome'}` — they'll set their own "
+                               "on first sign-in.")
+                except Exception as exc:  # noqa: BLE001
+                    st.error(str(exc))
+            if accts:
+                st.markdown("**Manage an account**")
+                who = st.selectbox("Account", list(accts), key="acct_pick")
+                a1, a2 = st.columns(2)
+                if a1.button("Reset password", key="acct_reset"):
+                    accounts.set_password(who, "PeerParley-Welcome", must_change=True)
+                    st.success("Reset to `PeerParley-Welcome` (must change on next sign-in).")
+                if a2.button("Toggle admin/instructor", key="acct_role"):
+                    accounts.set_role(who, "instructor"
+                                      if accts[who].get("role") == "admin" else "admin")
+                    st.success("Role changed.")
+                a3, a4 = st.columns(2)
+                if a3.button(("Deactivate" if accts[who].get("active", True) else "Activate"),
+                             key="acct_active"):
+                    accounts.set_active(who, not accts[who].get("active", True))
+                    st.success("Updated.")
+                if a4.button("Remove", key="acct_remove"):
+                    accounts.remove_account(who)
+                    st.success(f"Removed `{who}`.")
 
 DEFAULT_INVITE_BODY = (
     "Hi {first_name},<br><br>"
@@ -231,15 +309,24 @@ with tabs[0]:
               "disabled": "🔴 Closed (master switch off)"}[_state]
     st.caption(f"Current status for students: **{_badge}** · {survey.window_message(cur)}")
 
+    _own = survey.survey_owner(Vault(), slug)
+    if _own not in (None, "") and is_admin is False and not survey.can_access(_own, user):
+        st.warning(f"A survey with this course/eval already exists and belongs to "
+                   f"`{_own}`. Choose a different course or evaluation number.")
     if st.button("💾 Save survey + roster to vault", type="primary", disabled=cdf is None):
-        try:
-            sl, teams = survey.save_setup(course, eval_no, cdf, cur)
-            st.success(f"Saved survey `{sl}` — {len(teams)} team(s). Students' links are "
-                       "now live." + ("" if cfg.vault.backend != "local" else
-                       " (Backend is 'local' — fine for testing, but responses live only "
-                       "in this container. Use m365/dropbox/pcloud for real collection.)"))
-        except Exception as exc:  # noqa: BLE001
-            st.error(f"Save failed: {exc}")
+        if _own not in (None, "") and not survey.can_access(_own, user):
+            st.error(f"Can't save — this course/eval belongs to `{_own}`.")
+        else:
+            try:
+                stamp = user["user"] if _own in (None, "") else None
+                sl, teams = survey.save_setup(course, eval_no, cdf, cur, owner=stamp)
+                st.success(f"Saved survey `{sl}` — {len(teams)} team(s), owner "
+                           f"`{survey.survey_owner(Vault(), sl) or user['user']}`. Links "
+                           "are now live." + ("" if cfg.vault.backend != "local" else
+                           " (Backend is 'local' — responses live only in this container; "
+                           "use m365/dropbox/pcloud for real collection.)"))
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Save failed: {exc}")
 
     st.divider()
     st.markdown("##### Send personal links")
@@ -288,8 +375,13 @@ with tabs[1]:
     st.subheader("Responses")
     slug = survey.slugify(course, eval_no)
     vault = Vault()
-    status = survey.response_status(vault, slug)
-    if not status:
+    _owner = survey.survey_owner(vault, slug)
+    _blocked = _owner is not None and not survey.can_access(_owner, user)
+    status = [] if _blocked else survey.response_status(vault, slug)
+    if _blocked:
+        st.error(f"This section belongs to another instructor (`{_owner or 'unowned'}`). "
+                 "Only its owner or an administrator can see its responses.")
+    elif not status:
         st.info("No saved survey for this course/eval yet — set one up in step 1.")
     else:
         got = sum(1 for r in status if r["responded"])
@@ -543,8 +635,23 @@ with tabs[5]:
             st.write("**Subject:** " + mail.render_template(subject_t, ctx))
             st.markdown(mail.render_template(body_t, ctx), unsafe_allow_html=True)
 
-        st.caption("Prefer not to email from the app? Build the PDF bundle on the "
-                   "**Review & PDFs** tab and send the files yourself.")
+        # recipients CSV — for your own mail merge (parallels the invites links.csv)
+        _roster = S.get("roster")
+        _rows = []
+        for _t in S["teams"]:
+            for _m in _t.members:
+                _cx = _ctx(_m, course, eval_no)
+                _rec = _roster.match(_m.name) if _roster else None
+                _rows.append({"Team": _t.team, "Name": _m.name,
+                              "Email": (_rec or {}).get("email", ""),
+                              "Subject": mail.render_template(subject_t, _cx),
+                              "Body": mail.render_template(body_t, _cx),
+                              "Individual PDF": f"{_m.name.replace(' ', '_')}_feedback.pdf"})
+        st.download_button("⬇ recipients.csv (name · email · rendered subject/body)",
+                           pd.DataFrame(_rows).to_csv(index=False),
+                           f"peerparley_results_recipients_eval{eval_no}.csv", "text/csv")
+        st.caption("Prefer not to email from the app? Download **recipients.csv** here and "
+                   "the **PDF bundle** on the Review & PDFs tab, and send them yourself.")
         method = _method_selector("results_method")
         colx, coly = st.columns(2)
         drafts_only = colx.checkbox("Create Outlook drafts only (no send)",
