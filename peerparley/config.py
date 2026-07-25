@@ -55,7 +55,7 @@ class AppConfig:
     # used to build them. token_secret is optional — survey.token_secret()
     # derives a stable fallback from fernet_key when it's blank.
     token_secret: str = ""
-    public_url: str = ""
+    public_url: str = "https://peerparley.streamlit.app"
     vault: VaultConfig = field(default_factory=VaultConfig)
     email: EmailConfig = field(default_factory=EmailConfig)
     m365: Dict[str, Any] = field(default_factory=dict)
@@ -84,7 +84,7 @@ def load_config() -> AppConfig:
         app_password_sha256=str(_get(None, "app_password_sha256", "")),
         fernet_key=str(_get(None, "fernet_key", "")),
         token_secret=str(_get(None, "token_secret", "")),
-        public_url=str(_get(None, "public_url", "")),
+        public_url=str(_get(None, "public_url", "https://peerparley.streamlit.app")),
         vault=VaultConfig(backend=backend, folder=folder, options=dict(options)),
         email=email,
         m365=dict(m365),

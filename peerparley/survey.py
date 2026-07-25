@@ -515,6 +515,8 @@ def responses_to_long(vault: Vault, slug: str) -> pd.DataFrame:
                     "evaluatee_key": name_key(members[tpos]["name"]),
                     "points": _num((ans or {}).get("alloc")),
                     "public_comment": pub,
+                    "contribution_text": contribution,
+                    "improve_text": improve,
                     "confidential_comment": conf if first else "",
                     "rank": _rank_num((ans or {}).get("rank")),
                 }

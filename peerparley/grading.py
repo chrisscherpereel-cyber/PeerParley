@@ -139,10 +139,15 @@ class StudentResult:
     self_quantity: str = ""
     self_quality: str = ""
     self_effect: str = ""
-    # ---- comments ----
+    # ---- comments received (split for the feedback report) ----
     public_comments: List[str] = field(default_factory=list)
+    contributions: List[str] = field(default_factory=list)   # "what teammates valued"
+    improvements: List[str] = field(default_factory=list)     # "where to focus next"
     confidential_comments: List[str] = field(default_factory=list)
     received_breakdown: List[float] = field(default_factory=list)
+    # ---- feedback the student WROTE (response quality) ----
+    response_Q: float = float("nan")        # comment-support of the feedback they gave
+    response_points: int = 0                # points earned for their response quality
 
 
 @dataclass
@@ -237,20 +242,34 @@ def compute(
 
         received: Dict[str, List[float]] = {k: [] for k in member_keys}
         pub: Dict[str, List[str]] = {k: [] for k in member_keys}
+        contrib: Dict[str, List[str]] = {k: [] for k in member_keys}
+        improve: Dict[str, List[str]] = {k: [] for k in member_keys}
         conf: Dict[str, List[str]] = {k: [] for k in member_keys}
         dims: Dict[str, List[List[float]]] = {k: [[], [], [], []] for k in member_keys}
         ranks_recv: Dict[str, List[float]] = {k: [] for k in member_keys}
+        authored: Dict[str, List[str]] = {k: [] for k in member_keys}  # comments WRITTEN by k
         display_name: Dict[str, str] = {}
+        has_texts = ("contribution_text" in long_df.columns
+                     and "improve_text" in long_df.columns)
 
         for _, r in tdf.iterrows():
             k = r["evaluatee_key"]
+            e = r["evaluator_key"]
             if k not in received:
                 received[k] = []; pub[k] = []; conf[k] = []
+                contrib[k] = []; improve[k] = []
                 dims[k] = [[], [], [], []]; ranks_recv[k] = []
+            authored.setdefault(e, [])
             if r["points"] == r["points"]:
                 received[k].append(float(r["points"]))
             if r.get("public_comment"):
                 pub[k].append(str(r["public_comment"]).strip())
+                authored[e].append(str(r["public_comment"]).strip())
+            if has_texts:
+                if r.get("contribution_text"):
+                    contrib[k].append(str(r["contribution_text"]).strip())
+                if r.get("improve_text"):
+                    improve[k].append(str(r["improve_text"]).strip())
             if r.get("confidential_comment"):
                 conf[k].append(str(r["confidential_comment"]).strip())
             if has_ratings:
@@ -326,6 +345,19 @@ def compute(
                 self_responded = any(not math.isnan(x) for x in self_vals)
             self_letters = [letter_grade(v) for v in self_vals]
 
+            # ---- response quality: score the feedback THIS student WROTE ----
+            my_written = authored.get(k, [])
+            others_written = [c for kk, cl in authored.items() if kk != k for c in cl]
+            rq, rpts = 0.0, 0
+            for c in my_written:
+                cs = score_comment(c, others_written, settings.max_comment_points)
+                if cs.q >= rq:
+                    rq, rpts = cs.q, cs.points
+            response_Q = rq if my_written else float("nan")
+
+            recv_contrib = contrib.get(k, []) if has_texts else list(all_pub)
+            recv_improve = improve.get(k, []) if has_texts else []
+
             members.append(StudentResult(
                 name=display_name.get(k, k), key=k, team=team, team_score=ts,
                 received_total=round(received_total, 2), expected_share=round(expected_share, 2),
@@ -339,8 +371,11 @@ def compute(
                 self_responded=self_responded, self_vals=self_vals,
                 self_team_player=self_letters[0], self_quantity=self_letters[1],
                 self_quality=self_letters[2], self_effect=self_letters[3],
-                public_comments=all_pub, confidential_comments=conf.get(k, []),
-                received_breakdown=[round(x, 1) for x in rec]))
+                public_comments=all_pub, contributions=recv_contrib, improvements=recv_improve,
+                confidential_comments=conf.get(k, []),
+                received_breakdown=[round(x, 1) for x in rec],
+                response_Q=(round(response_Q, 3) if not math.isnan(response_Q) else float("nan")),
+                response_points=rpts))
         members.sort(key=lambda m: m.name.lower())
         results.append(TeamResult(team=team, members=members, team_score=ts))
 
@@ -371,8 +406,8 @@ def results_to_frame(teams: List[TeamResult]) -> pd.DataFrame:
                 "Pay Grade": _pct(m.pay_grade),
                 "Peer Ratio": m.peer_ratio,
                 "A (agreement)": m.A,
-                "Q (comment)": m.Q,
-                "Points": m.comment_points,
+                "Q (support)": m.Q,
+                "Response Pts": m.response_points,
                 "Multiplier": m.multiplier,
                 "Individual Score": m.individual_score,
                 "Grade Δ": f"{'+' if m.signed_pct >= 0 else ''}{m.signed_pct:g}%",
