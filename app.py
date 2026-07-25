@@ -619,7 +619,23 @@ with tabs[4]:
             st.download_button("⬇ Results CSV", frame.to_csv(index=False),
                                "peerparley_results.csv", "text/csv")
 
-            st.markdown("##### Generate PDFs")
+            st.markdown("##### Instructor reports")
+            st.caption("The section summary lists every student's dimension grades, pay "
+                       "grade, grade adjustment, and the points they earned for the quality "
+                       "of the feedback they wrote.")
+            r1, r2 = st.columns(2)
+            r1.download_button(
+                "⬇ Instructor summary (PDF)",
+                pdfgen.build_section_summary_pdf(teams, course, eval_no),
+                f"peerparley_{course or 'section'}_eval{eval_no}_summary.pdf",
+                "application/pdf", type="primary")
+            r2.download_button(
+                "⬇ Confidential feedback (PDF)",
+                pdfgen.build_confidential_pdf(teams, course, eval_no),
+                f"peerparley_{course or 'section'}_eval{eval_no}_confidential.pdf",
+                "application/pdf")
+
+            st.markdown("##### Student & team PDFs")
             colA, colB = st.columns(2)
             if colA.button("Build all PDFs (zip)"):
                 zbuf = io.BytesIO()
