@@ -1,14 +1,19 @@
 """Data ingestion: Qualtrics peer-eval exports + contact roster.
 
-Auto-detects Qualtrics column codes with a fixed-layout fallback, normalizes
-names for roster matching, and supports variable team sizes.
+`parse_qualtrics_export` reads a real PeerParley/Qualtrics raw export (the 113-
+column layout) and turns it into the SAME tidy `long_df` + `self_evals` the
+built-in survey produces, so a Qualtrics upload grades identically to collected
+responses — including dimension grades, forced-ranking performance, pay grade
+and self-evaluation.
 
-Expected Qualtrics question layout (typical PeerParley survey):
-  Q22.1_x  -> teammate name (x = 1..N slots)
-  Q23.1_x  -> points allocated to teammate x (out of 100 total)
-  Q24.1    -> free-text contribution comment (public/anonymous feedback)
-  Q24.2    -> free-text confidential comment (instructor only)
-Plus respondent identity columns (name / email / team).
+Qualtrics layout (per respondent):
+  Q{2k}.1_1 .. Q{2k}.1_4   the four 1-7 agreement ratings for roster position k
+  Q{2k+1}.1                "how to increase contribution"  (improve)  for k
+  Q{2k+1}.2                "most significant contribution"  (contribution) for k
+  Q22.1_k                  forced rank for k  (1 High, 2 Adequate, 3 Low)
+  Q23.1_k                  dollars allocated to k
+  Q24.1 / Q24.2            own contribution / confidential note
+  Team, Section, Class, Team Member 1..10, Recipient{First,Last,Email}
 """
 from __future__ import annotations
 
@@ -16,9 +21,11 @@ import io
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
+
+MAX_TEAM = 10
 
 
 # --------------------------------------------------------------------------- #
@@ -31,7 +38,6 @@ def normalize_name(name: str) -> str:
     s = s.lower().strip()
     s = re.sub(r"[^a-z0-9,\s]", " ", s)
     s = re.sub(r"\s+", " ", s)
-    # "Last, First" -> "first last"
     if "," in s:
         parts = [p.strip() for p in s.split(",", 1)]
         if len(parts) == 2:
@@ -44,100 +50,6 @@ def name_key(name: str) -> str:
     return " ".join(sorted(normalize_name(name).split()))
 
 
-# --------------------------------------------------------------------------- #
-# File readers
-# --------------------------------------------------------------------------- #
-def read_table(file, filename: str = "") -> pd.DataFrame:
-    name = (filename or getattr(file, "name", "")).lower()
-    raw = file.read() if hasattr(file, "read") else file
-    buf = io.BytesIO(raw) if isinstance(raw, (bytes, bytearray)) else raw
-    if name.endswith((".xlsx", ".xls")):
-        return pd.read_excel(buf)
-    # Qualtrics CSVs often have 2 extra header rows (labels + importids)
-    buf2 = io.BytesIO(raw) if isinstance(raw, (bytes, bytearray)) else buf
-    try:
-        df = pd.read_csv(buf2)
-        if _looks_like_qualtrics_meta(df):
-            buf3 = io.BytesIO(raw) if isinstance(raw, (bytes, bytearray)) else buf2
-            df = pd.read_csv(buf3, skiprows=[1, 2])
-        return df
-    except Exception:
-        buf.seek(0) if hasattr(buf, "seek") else None
-        return pd.read_csv(io.BytesIO(raw))
-
-
-def _looks_like_qualtrics_meta(df: pd.DataFrame) -> bool:
-    if df.empty:
-        return False
-    first = df.iloc[0].astype(str).str.contains("ImportId", case=False, na=False)
-    return bool(first.any())
-
-
-# --------------------------------------------------------------------------- #
-# Column detection
-# --------------------------------------------------------------------------- #
-@dataclass
-class ColumnMap:
-    respondent_name: Optional[str] = None
-    respondent_email: Optional[str] = None
-    respondent_team: Optional[str] = None
-    teammate_name_cols: List[str] = field(default_factory=list)   # Q22.1_x
-    points_cols: List[str] = field(default_factory=list)          # Q23.1_x
-    public_comment_col: Optional[str] = None                      # Q24.1
-    confidential_comment_col: Optional[str] = None                # Q24.2
-    detected: bool = False
-    notes: List[str] = field(default_factory=list)
-
-
-_NAME_PAT = re.compile(r"^Q22\.1_(\d+)$", re.I)
-_PTS_PAT = re.compile(r"^Q23\.1_(\d+)$", re.I)
-
-
-def detect_columns(df: pd.DataFrame) -> ColumnMap:
-    cm = ColumnMap()
-    cols = list(df.columns)
-
-    name_slots: Dict[int, str] = {}
-    pts_slots: Dict[int, str] = {}
-    for c in cols:
-        cs = str(c).strip()
-        m = _NAME_PAT.match(cs)
-        if m:
-            name_slots[int(m.group(1))] = c
-            continue
-        m = _PTS_PAT.match(cs)
-        if m:
-            pts_slots[int(m.group(1))] = c
-            continue
-        cl = cs.lower()
-        if cs == "Q24.1" or cl in {"q24.1"}:
-            cm.public_comment_col = c
-        elif cs == "Q24.2" or cl in {"q24.2"}:
-            cm.confidential_comment_col = c
-
-    cm.teammate_name_cols = [name_slots[k] for k in sorted(name_slots)]
-    cm.points_cols = [pts_slots[k] for k in sorted(pts_slots)]
-
-    # Respondent identity — fuzzy match common Qualtrics / roster headers
-    cm.respondent_name = _find(cols, ["recipientname", "respondent", "your name",
-                                      "full name", "name", "student"])
-    cm.respondent_email = _find(cols, ["recipientemail", "email"])
-    cm.respondent_team = _find(cols, ["team", "group", "project team"])
-
-    cm.detected = bool(cm.teammate_name_cols and cm.points_cols)
-    if not cm.detected:
-        cm.notes.append(
-            "Qualtrics codes not found; use the manual column mapper or the "
-            "fixed-layout fallback."
-        )
-    if len(cm.teammate_name_cols) != len(cm.points_cols):
-        cm.notes.append(
-            f"Name slots ({len(cm.teammate_name_cols)}) != point slots "
-            f"({len(cm.points_cols)}); extra slots ignored."
-        )
-    return cm
-
-
 def _find(cols, needles) -> Optional[str]:
     low = {str(c).lower().replace("_", " ").strip(): c for c in cols}
     for n in needles:
@@ -148,11 +60,53 @@ def _find(cols, needles) -> Optional[str]:
 
 
 # --------------------------------------------------------------------------- #
-# Long-format extraction: one row per (evaluator -> evaluatee)
+# File readers
+# --------------------------------------------------------------------------- #
+def read_table(file, filename: str = "") -> pd.DataFrame:
+    name = (filename or getattr(file, "name", "")).lower()
+    raw = file.read() if hasattr(file, "read") else file
+    buf = io.BytesIO(raw) if isinstance(raw, (bytes, bytearray)) else raw
+    if name.endswith((".xlsx", ".xls")):
+        return pd.read_excel(buf)
+    return pd.read_csv(buf)
+
+
+def _raw_frame(file, filename: str = "") -> pd.DataFrame:
+    """Read a raw export with NO header (every cell as string)."""
+    name = (filename or getattr(file, "name", "")).lower()
+    raw = file.read() if hasattr(file, "read") else file
+    if name.endswith((".xlsx", ".xls")):
+        return pd.read_excel(io.BytesIO(raw) if isinstance(raw, (bytes, bytearray)) else raw,
+                             header=None, dtype=object)
+    return pd.read_csv(io.BytesIO(raw) if isinstance(raw, (bytes, bytearray)) else raw,
+                       header=None, dtype=object, encoding="utf-8-sig")
+
+
+def read_raw_export(file, filename: str = "") -> Tuple[List[str], pd.DataFrame]:
+    """Return (codes, data_rows). Row 0 is the Qualtrics question-code row; the
+    first data row is the first one whose StartDate (col 0) looks like a date."""
+    df = _raw_frame(file, filename).reset_index(drop=True)
+    codes = ["" if v is None else str(v).strip() for v in df.iloc[0].tolist()]
+
+    def is_data(v):
+        if isinstance(v, pd.Timestamp):
+            return True
+        s = str(v)
+        return bool(re.search(r"\d{4}-\d{2}-\d{2}", s) or re.search(r"\d{1,2}/\d{1,2}/\d{2,4}", s))
+
+    start = 1
+    for i in range(1, min(6, len(df))):
+        if is_data(df.iloc[i, 0]):
+            start = i
+            break
+    return codes, df.iloc[start:].reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------- #
+# Roster (name_key -> contact record) — used for email matching
 # --------------------------------------------------------------------------- #
 @dataclass
 class Roster:
-    """Maps normalized name key -> contact record."""
     by_key: Dict[str, dict] = field(default_factory=dict)
 
     @classmethod
@@ -171,82 +125,107 @@ class Roster:
                 full = f"{row.get(first_c,'')} {row.get(last_c,'')}".strip()
             else:
                 continue
-            rec = {
+            r.by_key[name_key(full)] = {
                 "name": full,
                 "first": str(row.get(first_c, "")).strip() if first_c else full.split(" ")[0],
                 "last": str(row.get(last_c, "")).strip() if last_c else full.split(" ")[-1],
                 "email": str(row.get(email_c, "")).strip() if email_c else "",
                 "team": str(row.get(team_c, "")).strip() if team_c else "",
             }
-            r.by_key[name_key(full)] = rec
         return r
 
     def match(self, name: str) -> Optional[dict]:
         return self.by_key.get(name_key(name))
 
 
-def to_long(df: pd.DataFrame, cm: ColumnMap, roster: Optional[Roster] = None) -> pd.DataFrame:
-    """Return tidy rows: evaluator, evaluator_team, evaluatee, points,
-    public_comment, confidential_comment."""
-    records = []
-    n_slots = min(len(cm.teammate_name_cols), len(cm.points_cols))
-    for _, row in df.iterrows():
-        evaluator = str(row.get(cm.respondent_name, "")).strip() if cm.respondent_name else ""
-        team = str(row.get(cm.respondent_team, "")).strip() if cm.respondent_team else ""
-        if roster and evaluator:
-            m = roster.match(evaluator)
-            if m and m.get("team"):
-                team = team or m["team"]
-        pub = str(row.get(cm.public_comment_col, "")) if cm.public_comment_col else ""
-        conf = str(row.get(cm.confidential_comment_col, "")) if cm.confidential_comment_col else ""
-        for i in range(n_slots):
-            tname = row.get(cm.teammate_name_cols[i])
-            pts = row.get(cm.points_cols[i])
-            if pd.isna(tname) or str(tname).strip() == "":
+# --------------------------------------------------------------------------- #
+# Qualtrics export -> tidy long_df + self_evals (+ roster)
+# --------------------------------------------------------------------------- #
+def _f(v):
+    try:
+        f = float(v)
+        return f if f == f else None   # drop NaN
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_qualtrics_export(file, filename: str = ""
+                           ) -> Tuple[pd.DataFrame, Dict, Roster, dict]:
+    """Parse a Qualtrics raw export into (long_df, self_evals, roster, report).
+
+    long_df rows are one per (evaluator -> teammate) with points, comments,
+    r0..r3 and rank — exactly what grading.compute consumes. self_evals maps
+    (team, name_key) -> {ratings, rank}. roster gives name -> email for delivery.
+    """
+    codes, data = read_raw_export(file, filename)
+    idx = {c: i for i, c in enumerate(codes)}
+
+    def cell(row, code):
+        i = idx.get(code)
+        if i is None or i >= len(row):
+            return ""
+        v = row[i]
+        if v is None:
+            return ""
+        try:
+            if pd.isna(v):
+                return ""
+        except (TypeError, ValueError):
+            pass
+        return v
+
+    rows: List[dict] = []
+    self_evals: Dict = {}
+    roster = Roster()
+
+    for _, r in data.iterrows():
+        row = list(r)
+        first = str(cell(row, "RecipientFirstName")).strip()
+        last = str(cell(row, "RecipientLastName")).strip()
+        evaluator = f"{first} {last}".strip()
+        if not evaluator:
+            continue
+        ev_key = name_key(evaluator)
+        team = str(cell(row, "Team")).strip()
+        email = str(cell(row, "RecipientEmail")).strip()
+        roster.by_key.setdefault(ev_key, {"name": evaluator, "first": first, "last": last,
+                                          "email": email, "team": team})
+
+        members = [str(cell(row, f"Team Member {k}")).strip() for k in range(1, MAX_TEAM + 1)]
+        members = [m for m in members if m and m.lower() != "nan"]
+        conf = str(cell(row, "Q24.2") or "").strip()
+        first_row = True
+
+        for k, mate in enumerate(members, start=1):
+            ratings = [_f(cell(row, f"Q{2*k}.1_{j}")) for j in range(1, 5)]
+            rank = _f(cell(row, f"Q22.1_{k}"))
+            alloc = _f(cell(row, f"Q23.1_{k}"))
+            improve = str(cell(row, f"Q{2*k+1}.1") or "").strip()
+            contribution = str(cell(row, f"Q{2*k+1}.2") or "").strip()
+
+            if name_key(mate) == ev_key:  # self block → self-evaluation
+                self_evals[(team, ev_key)] = {"ratings": ratings, "rank": rank,
+                                              "self_contribution": str(cell(row, "Q24.1") or "")}
                 continue
-            try:
-                pval = float(pts)
-            except (TypeError, ValueError):
-                pval = float("nan")
-            records.append({
-                "evaluator": evaluator,
-                "evaluator_key": name_key(evaluator),
-                "evaluator_team": team,
-                "evaluatee": str(tname).strip(),
-                "evaluatee_key": name_key(str(tname)),
-                "points": pval,
-                "public_comment": pub if i == 0 else "",   # comment attributed once
-                "confidential_comment": conf if i == 0 else "",
-            })
-    long_df = pd.DataFrame.from_records(records)
-    return long_df
 
+            pub = " ".join(t for t in (contribution, improve) if t).strip()
+            entry = {
+                "evaluator": evaluator, "evaluator_key": ev_key, "evaluator_team": team,
+                "evaluatee": mate, "evaluatee_key": name_key(mate),
+                "points": alloc, "public_comment": pub,
+                "contribution_text": contribution, "improve_text": improve,
+                "confidential_comment": conf if first_row else "",
+                "rank": rank,
+            }
+            for j in range(4):
+                entry[f"r{j}"] = ratings[j]
+            rows.append(entry)
+            first_row = False
 
-def data_quality_report(long_df: pd.DataFrame, roster: Optional[Roster]) -> dict:
-    """Lightweight QA panel data."""
-    if long_df.empty:
-        return {"rows": 0, "issues": ["No evaluation rows parsed."]}
-    issues = []
-    teams = long_df["evaluator_team"].replace("", pd.NA).dropna().nunique()
-    missing_pts = int(long_df["points"].isna().sum())
-    if missing_pts:
-        issues.append(f"{missing_pts} allocation cells are blank/non-numeric.")
-    # Sum-to-100 check per evaluator
-    sums = long_df.groupby("evaluator_key")["points"].sum()
-    off = sums[(sums < 95) | (sums > 105)]
-    if len(off):
-        issues.append(f"{len(off)} evaluators did not allocate ~100 points total.")
-    unmatched = 0
-    if roster is not None:
-        keys = set(long_df["evaluatee_key"]) | set(long_df["evaluator_key"])
-        unmatched = sum(1 for k in keys if k and k not in roster.by_key)
-        if unmatched:
-            issues.append(f"{unmatched} names did not match the roster.")
-    return {
-        "rows": int(len(long_df)),
-        "evaluators": int(long_df["evaluator_key"].nunique()),
-        "evaluatees": int(long_df["evaluatee_key"].nunique()),
-        "teams": int(teams),
-        "unmatched_names": unmatched,
-        "issues": issues or ["No blocking issues detected."],
-    }
+    long_df = pd.DataFrame.from_records(rows)
+    report = {"rows": len(long_df),
+              "evaluators": int(long_df["evaluator_key"].nunique()) if not long_df.empty else 0,
+              "teams": int(long_df["evaluator_team"].replace("", pd.NA).dropna().nunique())
+              if not long_df.empty else 0,
+              "students": len(roster.by_key)}
+    return long_df, self_evals, roster, report
