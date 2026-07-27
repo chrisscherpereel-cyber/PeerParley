@@ -28,6 +28,7 @@ from peerparley.auth import logout, require_login
 from peerparley.config import load_config
 from peerparley import ingest
 from peerparley import survey
+from peerparley import emailpack
 from peerparley.grading import GradeSettings, compute, results_to_frame
 from peerparley import pdfgen
 from peerparley import email_delivery as mail
@@ -226,9 +227,8 @@ def _deliver(messages, method, drafts_only, ok_label="Done"):
 
 
 tabs = st.tabs([
-    "1 · Survey setup", "2 · Responses",
-    "3 · Upload & map", "4 · Configure", "5 · Review & PDFs",
-    "6 · Email", "7 · Compare rounds", "8 · Vault",
+    "1 · Survey setup", "2 · Responses", "3 · Configure",
+    "4 · Review & PDFs", "5 · Email", "6 · Compare rounds", "7 · Vault",
 ])
 
 # =========================================================================== #
@@ -260,6 +260,38 @@ with tabs[0]:
         if no_email:
             st.warning(f"{len(no_email)} student(s) have no email and can't be sent a "
                        "link: " + ", ".join(no_email[:8]) + ("…" if len(no_email) > 8 else ""))
+
+    # ---- Already collected in Qualtrics? Upload the raw export instead -------
+    with st.expander("Already have responses? Upload a Qualtrics / raw export"):
+        st.caption("Use this if you ran the evaluation in Qualtrics instead of the built-in "
+                   "survey. Upload the raw export (CSV or XLSX) — PeerParley reads the "
+                   "standard peer-evaluation layout (ratings, ranking, $ allocation, "
+                   "comments) and grades it exactly like collected responses. No column "
+                   "mapping needed.")
+        qfile = st.file_uploader("Qualtrics raw export (CSV/XLSX)",
+                                 type=["csv", "xlsx", "xls"], key="qualtrics_upload")
+        if qfile is not None:
+            try:
+                q_long, q_self, q_roster, q_rep = ingest.parse_qualtrics_export(
+                    qfile, qfile.name)
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Couldn't read that export: {exc}")
+                q_long = None
+            if q_long is not None and not q_long.empty:
+                S["long_df"] = q_long
+                S["self_evals"] = q_self
+                S["roster"] = q_roster
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Evaluation rows", q_rep["rows"])
+                m2.metric("Respondents", q_rep["evaluators"])
+                m3.metric("Teams", q_rep["teams"])
+                st.success("Parsed the export. Open **4 · Review & PDFs** to see the "
+                           "grades, then **5 · Email** to send feedback.")
+                with st.expander("Preview parsed rows"):
+                    st.dataframe(q_long.head(30), use_container_width=True)
+            elif q_long is not None:
+                st.warning("No evaluation rows found. Check that this is the raw data "
+                           "export (with the Q-code header row).")
 
     cur = {**survey.DEFAULT_SURVEY, **(S.get("survey_cfg") or {})}
 
@@ -518,68 +550,9 @@ with tabs[1]:
                            "Open **5 · Review & PDFs** to grade, then **6 · Email**.")
 
 # =========================================================================== #
-# TAB 3 — Upload & map  (optional Qualtrics fallback)
+# TAB 3 — Configure grading
 # =========================================================================== #
 with tabs[2]:
-    st.subheader("Upload Qualtrics export + roster")
-    st.caption("Optional — only if you collected responses in Qualtrics instead of the "
-               "built-in survey. Otherwise use tabs 1–2.")
-    c1, c2 = st.columns(2)
-    with c1:
-        eval_file = st.file_uploader("Peer evaluation export (CSV/XLSX)",
-                                     type=["csv", "xlsx", "xls"])
-    with c2:
-        roster_file = st.file_uploader("Contact roster (CSV/XLSX)",
-                                       type=["csv", "xlsx", "xls"])
-
-    if eval_file is not None:
-        df = ingest.read_table(eval_file, eval_file.name)
-        S["raw_df"] = df
-        roster = None
-        if roster_file is not None:
-            rdf = ingest.read_table(roster_file, roster_file.name)
-            roster = ingest.Roster.from_df(rdf)
-            S["roster"] = roster
-        cm = ingest.detect_columns(df)
-        st.success(f"Loaded {len(df)} rows · "
-                   f"{'auto-detected' if cm.detected else 'needs mapping'}")
-
-        with st.expander("Column mapping", expanded=not cm.detected):
-            cols = ["(none)"] + list(df.columns)
-            def _sel(label, cur):
-                idx = cols.index(cur) if cur in cols else 0
-                v = st.selectbox(label, cols, index=idx, key="map_" + label)
-                return None if v == "(none)" else v
-            cm.respondent_name = _sel("Respondent name", cm.respondent_name)
-            cm.respondent_email = _sel("Respondent email", cm.respondent_email)
-            cm.respondent_team = _sel("Respondent team", cm.respondent_team)
-            cm.public_comment_col = _sel("Public comment (Q24.1)", cm.public_comment_col)
-            cm.confidential_comment_col = _sel("Confidential comment (Q24.2)",
-                                               cm.confidential_comment_col)
-            st.caption(f"Teammate-name slots: {cm.teammate_name_cols or '—'}")
-            st.caption(f"Points slots: {cm.points_cols or '—'}")
-        S["colmap"] = cm
-
-        long_df = ingest.to_long(df, cm, S.get("roster"))
-        S["long_df"] = long_df
-        S["self_evals"] = {}          # Qualtrics export carries no self-rating block here
-
-        st.markdown("##### Data-quality check")
-        qa = ingest.data_quality_report(long_df, S.get("roster"))
-        mm1, mm2, mm3, mm4 = st.columns(4)
-        mm1.metric("Eval rows", qa.get("rows", 0))
-        mm2.metric("Evaluators", qa.get("evaluators", 0))
-        mm3.metric("Teams", qa.get("teams", 0))
-        mm4.metric("Unmatched names", qa.get("unmatched_names", 0))
-        for issue in qa.get("issues", []):
-            st.write("• " + issue)
-        with st.expander("Preview tidy rows"):
-            st.dataframe(long_df.head(50), use_container_width=True)
-
-# =========================================================================== #
-# TAB 4 — Configure grading
-# =========================================================================== #
-with tabs[3]:
     st.subheader("Grading settings")
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -623,9 +596,9 @@ with tabs[3]:
     )
 
 # =========================================================================== #
-# TAB 5 — Review + PDFs
+# TAB 4 — Review + PDFs
 # =========================================================================== #
-with tabs[4]:
+with tabs[3]:
     st.subheader("Results & deliverables")
     if "long_df" not in S:
         st.info("Load responses in step 2 (or upload in step 3) first.")
@@ -698,9 +671,9 @@ with tabs[4]:
                     _render_pdf(pdf)
 
 # =========================================================================== #
-# TAB 6 — Email
+# TAB 5 — Email
 # =========================================================================== #
-with tabs[5]:
+with tabs[4]:
     st.subheader("Email delivery")
     if "teams" not in S:
         st.info("Compute results in step 5 first.")
@@ -740,6 +713,40 @@ with tabs[5]:
                            f"peerparley_results_recipients_eval{eval_no}.csv", "text/csv")
         st.caption("Prefer not to email from the app? Download **recipients.csv** here and "
                    "the **PDF bundle** on the Review & PDFs tab, and send them yourself.")
+
+        # ---- complete email pack (.eml folders) ------------------------------
+        st.markdown("##### Complete email pack (.eml folder)")
+        st.caption("One zip of ready-to-send **.eml** files — Invitations, Reminders, and "
+                   "Results (with each student's feedback PDF attached). Open them in "
+                   "Outlook / Apple Mail and send; no API needed.")
+        if st.button("Build email pack (zip)"):
+            vault = Vault()
+            slug = survey.slugify(course, eval_no)
+            rep = survey.load_survey(vault, slug).get("report") or {}
+            snap = survey.load_roster_snapshot(vault, slug)
+            base_url = getattr(cfg, "public_url", "") or ""
+            folders = {}
+            if snap:
+                links = survey.student_links(base_url, slug, snap.get("teams", {}),
+                                             survey.token_secret(cfg))
+                folders["Invitations"] = emailpack.invite_items(
+                    links, "Your peer evaluation for {class} (Eval {eval_no})",
+                    DEFAULT_INVITE_BODY, course, eval_no)
+                non = {(s["team"], s["pos"]) for s in survey.response_status(vault, slug)
+                       if not s["responded"]}
+                rem = [l for l in links if (l["team"], l["pos"]) in non]
+                folders["Reminders"] = emailpack.invite_items(
+                    rem, "Reminder: your peer evaluation for {class}",
+                    DEFAULT_INVITE_BODY, course, eval_no)
+            folders["Results"] = emailpack.results_items(
+                S["teams"], S.get("roster"), subject_t, body_t, attach_team,
+                course, eval_no, report=rep)
+            S["email_pack"] = emailpack.zip_folders(folders)
+        if S.get("email_pack"):
+            st.download_button("⬇ Download email pack (zip)", S["email_pack"],
+                               f"peerparley_{course or 'section'}_eval{eval_no}_emails.zip",
+                               "application/zip")
+
         method = _method_selector("results_method")
         colx, coly = st.columns(2)
         drafts_only = colx.checkbox("Create Outlook drafts only (no send)",
@@ -773,9 +780,9 @@ with tabs[5]:
                 st.dataframe(pd.DataFrame(result["failed"]))
 
 # =========================================================================== #
-# TAB 7 — Compare rounds (eval 1 vs 2 vs 3 for the same students)
+# TAB 6 — Compare rounds (eval 1 vs 2 vs 3 for the same students)
 # =========================================================================== #
-with tabs[6]:
+with tabs[5]:
     st.subheader("Compare evaluations")
     st.caption("See how the same students' peer-evaluation results change across "
                "evaluation rounds for this course.")
@@ -842,9 +849,9 @@ with tabs[6]:
 
 
 # =========================================================================== #
-# TAB 8 — Vault (encrypted save / load behind the firewall)
+# TAB 7 — Vault (encrypted save / load behind the firewall)
 # =========================================================================== #
-with tabs[7]:
+with tabs[6]:
     st.subheader("Encrypted vault — behind the firewall")
     st.caption("Bundles are AES-encrypted locally, then written to "
                f"**{cfg.vault.backend}**. The cloud host never stores plaintext PII.")
