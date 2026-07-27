@@ -318,7 +318,9 @@ with tabs[0]:
             cur["confidential_prompt"] = st.text_input("Confidential-note prompt",
                                                        cur["confidential_prompt"])
 
-    cur.setdefault("report", dict(survey.REPORT_DEFAULTS))
+    cur.setdefault("report", dict(getattr(survey, "REPORT_DEFAULTS", {
+        "performance": True, "grade_adjustment": True, "dimensions": True,
+        "pay_grade": True, "valued": True, "focus": True, "response_quality": True})))
     with st.expander("What students see in their feedback report"):
         st.caption("Choose which sections appear on each student's feedback PDF. "
                    "Grading is unaffected — this only changes what's shown to students.")
