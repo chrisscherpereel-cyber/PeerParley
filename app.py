@@ -193,9 +193,12 @@ valued them more than average; below 100% means less. Because it's measured
 against the team's own average, self-allocations or blank answers can never push a
 whole team into the negative.
 
-**3. Grade adjustment (the ± %).** This is what moves the grade:
+**3. Grade adjustment (the ± %).** This is what moves the grade. You choose *which*
+peer signal drives it under **Peer-adjustment method** below — the $100 allocation
+(default, the WebPA/CATME factor), the four rating statements, the forced ranking,
+or a combination. Whichever you pick, it works the same way:
 
-> adjustment ≈ **sensitivity** × (pay grade − 100%)
+> adjustment ≈ **sensitivity** × (peer factor − 100%)
 
 So a student **above** the team average gets a **bonus (+%)**, one **below** gets a
 **deduction (−%)**, and one exactly average gets **0%**. It's capped at the maximum
@@ -663,27 +666,47 @@ with tabs[2]:
     with st.expander("📖 How grading works (plain English)", expanded=True):
         st.markdown(GRADING_EXPLAINER)
 
-    st.markdown("##### The two settings most people touch")
-    c1, c2 = st.columns(2)
+    st.markdown("##### Peer-adjustment method")
+    adj_source = st.selectbox(
+        "How to measure each student's peer contribution",
+        ["allocation", "rating", "ranking", "combined"],
+        format_func=lambda x: {
+            "allocation": "Points shared — the $100 allocation (WebPA / CATME family) · default",
+            "rating": "Average of the four rating statements (CATME-style)",
+            "ranking": "Forced ranking tiers — High / Adequate / Low",
+            "combined": "Combined — average of the points and rating measures",
+        }[x],
+        help="Each is a normalized peer-assessment factor: a student's peer score ÷ the "
+             "team average, so 100% = average. The grade adjustment then applies the same "
+             "way. See the explainer above and GRADING.md for the research behind each.")
+
+    st.markdown("##### Main settings")
+    c1, c2, c3 = st.columns(3)
     with c1:
-        B = st.slider("How strongly peer input adjusts grades (sensitivity)",
+        B = st.slider("Sensitivity (how strongly peers move the grade)",
                       0.0, 1.5, 0.5, 0.05,
-                      help="0 = peers don't move the grade at all; 1 = full effect.")
+                      help="0 = peers don't move the grade at all; 1 = full effect. This is "
+                           "the WebPA/SPARK 'weighting fraction'.")
     with c2:
         max_adj = st.slider("Maximum adjustment (± %)", 0, 30, 15, 1,
-                            help="Caps how far above or below the team score any grade "
-                                 "can move. ±15% means the top student can earn at most "
-                                 "+15% and the lowest at most −15%.")
+                            help="Caps how far above/below the team score any grade can move.")
+    with c3:
+        maxpts = st.number_input("Points for feedback quality", 1, 20, 5,
+                                 help="Points a student earns for the quality of the "
+                                      "feedback THEY wrote about teammates.")
 
     with st.expander("Advanced options (most instructors leave these alone)"):
         team_default = st.number_input("Default team score (before peer adjustment)",
                                        0.0, 200.0, 100.0)
-        maxpts = st.number_input("Max points for feedback quality", 1, 20, 5,
-                                 help="Points a student can earn for the quality of the "
-                                      "feedback they wrote about teammates.")
+        normalize = st.checkbox("Correct for rater leniency (z-score each evaluator)",
+                                value=False,
+                                help="Removes systematic easy-grader / hard-grader "
+                                     "differences before comparing students, by z-scoring "
+                                     "each evaluator's points. Applies to the points ($100) "
+                                     "and combined methods.")
         guard = st.checkbox("Agreement guard — soften a forced 'Low' when evaluators "
                             "strongly disagree", value=True)
-        method = st.selectbox(
+        perf_method = st.selectbox(
             "Performance label when there's NO forced ranking",
             ["allocation_ratio", "rank_linear", "rank_one_mean"],
             format_func=lambda x: {
@@ -703,10 +726,12 @@ with tabs[2]:
         team_score_default=team_default, sensitivity_B=B,
         min_multiplier=1 - max_adj / 100.0, max_multiplier=1 + max_adj / 100.0,
         max_comment_points=int(maxpts), rounding_step=int(rstep), rounding_mode=rmode,
-        performance_method=method, performance_band=band, agreement_guard=guard,
+        performance_method=perf_method, performance_band=band, agreement_guard=guard,
+        adjustment_source=adj_source, normalize_raters=normalize,
     )
-    st.success(f"Grades will move at most **±{max_adj}%** from the team score, based on "
-               "each student's pay grade (share of the team average).")
+    st.success(f"Method: **{adj_source}** · grades move at most **±{max_adj}%** from the "
+               "team score, centred on the team average (above average → bonus, below → "
+               "deduction).")
 
 # =========================================================================== #
 # TAB 4 — Review + PDFs
@@ -834,39 +859,6 @@ with tabs[4]:
         st.caption("Prefer not to email from the app? Download **recipients.csv** here and "
                    "the **PDF bundle** on the Results tab, and send them yourself.")
 
-        # ---- complete email pack (.eml folders) ------------------------------
-        st.markdown("##### Complete email pack (.eml folder)")
-        st.caption("One zip of ready-to-send **.eml** files — Invitations, Reminders, and "
-                   "Results (with each student's feedback PDF attached). Open them in "
-                   "Outlook / Apple Mail and send; no API needed.")
-        if st.button("Build email pack (zip)"):
-            vault = Vault()
-            slug = survey.slugify(course, eval_no)
-            rep = survey.load_survey(vault, slug).get("report") or {}
-            snap = survey.load_roster_snapshot(vault, slug)
-            base_url = getattr(cfg, "public_url", "") or ""
-            folders = {}
-            if snap:
-                links = survey.student_links(base_url, slug, snap.get("teams", {}),
-                                             survey.token_secret(cfg))
-                folders["Invitations"] = emailpack.invite_items(
-                    links, "Your peer evaluation for {class} (Eval {eval_no})",
-                    DEFAULT_INVITE_BODY, course, eval_no)
-                non = {(s["team"], s["pos"]) for s in survey.response_status(vault, slug)
-                       if not s["responded"]}
-                rem = [l for l in links if (l["team"], l["pos"]) in non]
-                folders["Reminders"] = emailpack.invite_items(
-                    rem, "Reminder: your peer evaluation for {class}",
-                    DEFAULT_INVITE_BODY, course, eval_no)
-            folders["Results"] = emailpack.results_items(
-                S["teams"], S.get("roster"), subject_t, body_t, attach_team,
-                course, eval_no, report=rep)
-            S["email_pack"] = emailpack.zip_folders(folders)
-        if S.get("email_pack"):
-            st.download_button("⬇ Download email pack (zip)", S["email_pack"],
-                               f"peerparley_{course or 'section'}_eval{eval_no}_emails.zip",
-                               "application/zip")
-
         method = _method_selector("results_method")
         colx, coly = st.columns(2)
         drafts_only = colx.checkbox("Create Outlook drafts only (no send)",
@@ -898,6 +890,19 @@ with tabs[4]:
                        f"failed {len(result['failed'])} of {result['total']}.")
             if result["failed"]:
                 st.dataframe(pd.DataFrame(result["failed"]))
+
+        st.markdown("**Or download a results email pack (.eml folder)**")
+        st.caption("Ready-to-send .eml files, one per student, each with their feedback "
+                   "PDF attached — open in Outlook / Apple Mail. No mail server needed.")
+        if st.button("Build results email pack (zip)", key="res_pack"):
+            rep = survey.load_survey(Vault(), survey.slugify(course, eval_no)).get("report") or {}
+            items = emailpack.results_items(S["teams"], S.get("roster"), subject_t, body_t,
+                                            attach_team, course, eval_no, report=rep)
+            S["results_pack"] = emailpack.zip_folders({"Results": items})
+        if S.get("results_pack"):
+            st.download_button("⬇ Download results emails (zip)", S["results_pack"],
+                               f"{survey.slugify(course, eval_no)}_results_emails.zip",
+                               "application/zip")
 
 # =========================================================================== #
 # TAB 6 — Compare rounds (eval 1 vs 2 vs 3 for the same students)

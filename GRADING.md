@@ -20,6 +20,34 @@ Above 100% → teammates valued this student more than average; below → less. 
 it is measured against the team's **own** average, self-allocations or blank answers
 can never push a whole team below 100%.
 
+## Peer-adjustment methods (choose one on the *Grading rules* tab)
+
+Every method produces a **normalized peer factor** — a student's peer score ÷ the
+team average, so **1.0 (100%) = average**. The grade adjustment then applies the
+same way (§2). These are the established, research-validated approaches; they
+differ only in *which* peer signal is used.
+
+| Method | Peer signal used | Basis in the literature |
+|---|---|---|
+| **Points shared** *(default)* | the $100 allocation | WebPA normalized weighting factor (Loughborough; Loddington & Pond et al., 2009) and the CATME/autorating factor (Ohland et al., 2012) — both = individual score ÷ team average. |
+| **Rating factor** | mean of the four 1–7 statements | CATME "adjustment factor" computed from Likert competency ratings (Ohland et al., 2012); Likert ratings are often more reliable than a forced dollar split. |
+| **Forced-ranking tiers** | High / Adequate / Low ranking | Rank/tier methods, robust to differences in how strictly individuals rate. |
+| **Combined** | average of points + ratings | Triangulating two independent signals reduces the influence of any single noisy one. |
+
+**The weighting fraction.** All methods feed the same formula, which is
+algebraically the WebPA/SPARK weighting: `individual = group × [(1 − w) + w ×
+factor]`, where **w is the sensitivity B**. So B directly limits how much peers
+can move the grade (SPARK: Freeman & McKenzie, 2002).
+
+**Correct for rater leniency (optional).** Ticking this z-scores each evaluator's
+allocations before comparing students, removing systematic easy-grader /
+hard-grader effects — a standard reliability improvement for peer assessment.
+Applies to the points and combined methods.
+
+**All are optional and degrade gracefully:** if a method's signal wasn't
+collected (e.g. no ratings on a plain allocation export), the engine falls back to
+the points allocation automatically.
+
 ## 2. Grade adjustment (the ± %)
 ```
 multiplier      = 1 + B · A · Q · (pay_grade − 1)      # clamped to [1−cap, 1+cap]
