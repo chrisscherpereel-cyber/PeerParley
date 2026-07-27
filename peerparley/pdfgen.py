@@ -157,7 +157,15 @@ def _dim_meter(c, x, y, label, peer_val, peer_letter, self_val, self_letter, sho
 # --------------------------------------------------------------------------- #
 # 1. Individual anonymous feedback PDF (student-facing)
 # --------------------------------------------------------------------------- #
-def build_individual_pdf(m: StudentResult, eval_no: str = "", course: str = "") -> bytes:
+_REPORT_ALL = {"performance": True, "grade_adjustment": True, "dimensions": True,
+               "pay_grade": True, "valued": True, "focus": True, "response_quality": True}
+
+
+def build_individual_pdf(m: StudentResult, eval_no: str = "", course: str = "",
+                         report: dict = None) -> bytes:
+    """Student feedback PDF. `report` (dict of booleans) controls which sections
+    appear; anything omitted defaults to shown."""
+    rep = {**_REPORT_ALL, **(report or {})}
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=letter)
     sub = f"Evaluation {eval_no}" if eval_no else ""
@@ -175,7 +183,7 @@ def build_individual_pdf(m: StudentResult, eval_no: str = "", course: str = "") 
             ("Quality of work", m.peer_vals[2], m.quality, m.self_vals[2], m.self_quality),
             ("Effect on team", m.peer_vals[3], m.effect, m.self_vals[3], m.self_effect)]
     show_self = m.self_responded
-    if any(lbl for _, _, lbl, _, _ in dims):
+    if rep["dimensions"] and any(lbl for _, _, lbl, _, _ in dims):
         y = _section(c, y, "How your teammates rated you", B.NAVY)
         c.setFont("Helvetica", 7.5); c.setFillColor(B.GREY)
         c.drawString(MARGIN + 1.55 * inch, y + 2, "peer average")
@@ -192,28 +200,35 @@ def build_individual_pdf(m: StudentResult, eval_no: str = "", course: str = "") 
         y -= 6
 
     # ---- performance · pay grade · grade adjustment ----
-    _perf_pill(c, MARGIN, y - 4, m.performance)
-    if not _is_nan(m.pay_grade):
+    pay_shown = rep["pay_grade"] and not _is_nan(m.pay_grade)
+    row_used = False
+    if rep["performance"]:
+        _perf_pill(c, MARGIN, y - 4, m.performance); row_used = True
+    if pay_shown:
         c.setFont("Helvetica", 10); c.setFillColor(B.NAVY)
-        c.drawString(MARGIN + 1.4 * inch, y + 2,
+        c.drawString(MARGIN + (1.4 * inch if rep["performance"] else 0), y + 2,
                      f"Pay grade: {m.pay_grade:.0%} of the team average*")
-    y -= 30
-    _grade_meter(c, MARGIN, y - 6, PAGE_W - 2 * MARGIN, m.signed_pct)
-    y -= 54
+        row_used = True
+    if row_used:
+        y -= 30
+    if rep["grade_adjustment"]:
+        _grade_meter(c, MARGIN, y - 6, PAGE_W - 2 * MARGIN, m.signed_pct)
+        y -= 54
 
     # ---- what teammates valued (green) / where to focus (amber) ----
-    y = _section(c, y, "What your teammates valued", B.GREEN)
-    y = _bullets(c, y, m.contributions or m.public_comments, B.GREEN,
-                 "No contribution highlights were submitted this cycle.")
-    y -= 8
-    if m.improvements:
+    if rep["valued"]:
+        y = _section(c, y, "What your teammates valued", B.GREEN)
+        y = _bullets(c, y, m.contributions or m.public_comments, B.GREEN,
+                     "No contribution highlights were submitted this cycle.")
+        y -= 8
+    if rep["focus"] and m.improvements:
         y = _section(c, y, "Where to focus next", B.AMBER)
         y = _bullets(c, y, m.improvements, B.AMBER,
                      "No improvement suggestions were submitted this cycle.")
         y -= 8
 
     # ---- the feedback you gave (response quality) ----
-    if not _is_nan(m.response_Q) or m.response_points:
+    if rep["response_quality"] and (not _is_nan(m.response_Q) or m.response_points):
         y = _section(c, y, "The feedback you gave your teammates", B.NAVY)
         qtxt = "—" if _is_nan(m.response_Q) else f"{m.response_Q:.0%}"
         y = _wrap(c, f"Written-comment support (how well your comments back up your ratings): "
@@ -221,10 +236,11 @@ def build_individual_pdf(m: StudentResult, eval_no: str = "", course: str = "") 
                   MARGIN, y, PAGE_W - 2 * MARGIN, "Helvetica", 10, 14, B.NAVY)
         y -= 8
 
-    c.setFillColor(B.GREY); c.setFont("Helvetica-Oblique", 8)
-    c.drawString(MARGIN, MARGIN + 0.15 * inch,
-                 "* Pay grade shows your average received allocation vs the team average; "
-                 "100% = an even share.")
+    if pay_shown:
+        c.setFillColor(B.GREY); c.setFont("Helvetica-Oblique", 8)
+        c.drawString(MARGIN, MARGIN + 0.15 * inch,
+                     "* Pay grade shows your average received allocation vs the team average; "
+                     "100% = an even share.")
     _footer(c, "Anonymous peer feedback — shared only with you.")
     c.showPage(); c.save()
     return buf.getvalue()
@@ -397,5 +413,70 @@ def build_confidential_pdf(teams: List[TeamResult], course: str = "",
                 y -= 6
             y -= 8
     _footer(c, "Confidential instructor feedback.")
+    c.showPage(); c.save()
+    return buf.getvalue()
+
+
+# --------------------------------------------------------------------------- #
+# 5. Evaluation comparison PDF  (across rounds, instructor-only)
+# --------------------------------------------------------------------------- #
+def build_comparison_pdf(course: str, evals) -> bytes:
+    """evals = [(eval_no, [TeamResult, ...]), ...] — one entry per round.
+    Landscape table: each student's individual score and grade Δ across rounds."""
+    buf = io.BytesIO()
+    pw, ph = landscape(letter)
+    c = canvas.Canvas(buf, pagesize=landscape(letter))
+    y = _header(c, "Evaluation Comparison", course or "", pw, ph)
+    c.setFillColor(B.GREY); c.setFont("Helvetica", 9)
+    c.drawString(MARGIN, y, "Individual score and grade adjustment (Δ) for each student "
+                 f"across {len(evals)} evaluations.")
+    y -= 22
+
+    by_eval, team_of, names = {}, {}, set()
+    for en, teams in evals:
+        d = {}
+        for t in teams:
+            for m in t.members:
+                d[m.name] = m
+                team_of[m.name] = t.team
+                names.add(m.name)
+        by_eval[en] = d
+    students = sorted(names, key=lambda nm: (str(team_of.get(nm, "")), nm.lower()))
+    eval_nos = [en for en, _ in evals]
+
+    name_w = 2.6 * inch
+    col_w = (pw - 2 * MARGIN - name_w) / max(1, len(eval_nos))
+
+    def head():
+        c.setFont("Helvetica-Bold", 9); c.setFillColor(B.NAVY)
+        c.drawString(MARGIN, yy[0], "Student  ·  Team")
+        for i, en in enumerate(eval_nos):
+            c.drawString(MARGIN + name_w + i * col_w, yy[0], f"Eval {en}  (score / Δ)")
+        yy[0] -= 6
+        c.setStrokeColor(B.GREY_LIGHT); c.setLineWidth(0.8)
+        c.line(MARGIN, yy[0], pw - MARGIN, yy[0]); yy[0] -= 14
+
+    yy = [y]
+    head()
+    for nm in students:
+        if yy[0] < MARGIN + 0.8 * inch:
+            _footer(c, page_w=pw); c.showPage(); yy[0] = ph - MARGIN; head()
+        c.setFont("Helvetica", 9); c.setFillColor(B.NAVY)
+        c.drawString(MARGIN, yy[0], f"{nm[:30]}  ·  Team {team_of.get(nm, '')}")
+        for i, en in enumerate(eval_nos):
+            m = by_eval[en].get(nm)
+            x = MARGIN + name_w + i * col_w
+            if m is None:
+                c.setFillColor(B.GREY); c.setFont("Helvetica-Oblique", 9)
+                c.drawString(x, yy[0], "—")
+            else:
+                c.setFillColor(B.NAVY); c.setFont("Helvetica", 9)
+                c.drawString(x, yy[0], f"{m.individual_score:g}")
+                c.setFillColor(B.grade_color(m.signed_pct)); c.setFont("Helvetica-Bold", 8)
+                c.drawString(x + 0.7 * inch, yy[0],
+                             f"{'+' if m.signed_pct >= 0 else ''}{m.signed_pct:g}%")
+        yy[0] -= 13
+
+    _footer(c, "Evaluation comparison — instructor only.", page_w=pw)
     c.showPage(); c.save()
     return buf.getvalue()

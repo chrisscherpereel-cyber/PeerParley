@@ -102,7 +102,20 @@ DEFAULT_SURVEY: Dict = {
     "opens_at": "",           # ISO datetime; blank = open as soon as is_open is on
     "closes_at": "",          # ISO datetime; blank = no automatic close
     "closed_note": "This peer evaluation is now closed. Thank you.",
+
+    # ---- What the STUDENT feedback PDF shows (instructor-controlled) ----
+    "report": {
+        "performance": True,        # High/Adequate/Low pill
+        "grade_adjustment": True,   # the +/- % vs team score meter
+        "dimensions": True,         # rating meters + letter grades
+        "pay_grade": True,          # pay grade line
+        "valued": True,             # "What your teammates valued"
+        "focus": True,              # "Where to focus next"
+        "response_quality": True,   # "The feedback you gave" (Q + points)
+    },
 }
+
+REPORT_DEFAULTS = dict(DEFAULT_SURVEY["report"])
 
 
 # --------------------------------------------------------------------------- #
@@ -546,6 +559,36 @@ def responses_to_long(vault: Vault, slug: str) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 # Public student form (served by app.py when a ?t=<token> is present)
 # --------------------------------------------------------------------------- #
+def submission_problems(answers: Dict, survey_cfg: Dict, n_members: int) -> List[str]:
+    """Pure validation used both for live feedback and to gate the submit button.
+    Returns a list of human-readable problems ([] means ready to submit)."""
+    problems: List[str] = []
+    if survey_cfg.get("ask_ratings", True):
+        stmts = survey_cfg.get("rating_statements") or RATING_STATEMENTS
+        missing = 0
+        for i in range(n_members):
+            r = (answers.get(str(i), {}) or {}).get("ratings") or []
+            for d in range(len(stmts)):
+                if d >= len(r) or r[d] in (None, ""):
+                    missing += 1
+        if missing:
+            problems.append(f"{missing} rating statement(s) still unanswered.")
+    if survey_cfg.get("ask_ranking", True):
+        cats = survey_cfg.get("ranking_categories") or RANK_CATEGORIES
+        ranks = [(answers.get(str(i), {}) or {}).get("rank") for i in range(n_members)]
+        if any(r is None for r in ranks):
+            problems.append("Place every team member in a ranking category.")
+        elif n_members >= len(cats) and len(set(ranks)) < len(cats):
+            problems.append("Use every ranking category at least once.")
+    if survey_cfg.get("ask_allocation", True):
+        total = int(survey_cfg.get("points_total", 100))
+        running = sum(int((answers.get(str(i), {}) or {}).get("alloc") or 0)
+                      for i in range(n_members))
+        if running != total:
+            problems.append(f"Pay allocation must total exactly ${total} (currently ${running}).")
+    return problems
+
+
 def render_student_app(token: str) -> None:
     """Render one student's evaluation form and record their submission.
 
@@ -609,111 +652,126 @@ def render_student_app(token: str) -> None:
     statements = survey.get("rating_statements") or RATING_STATEMENTS
     cats = survey.get("ranking_categories") or RANK_CATEGORIES
     total = int(survey.get("points_total", 100))
-    prior = load_response(vault, slug, team, pos) or {}
+
+    # Load any prior submission once, then let widget state drive the rest (this
+    # form is NOT wrapped in st.form, so every answer re-runs and validates live).
+    prior_key = f"pp_prior::{slug}::{pos}"
+    if prior_key not in st.session_state:
+        st.session_state[prior_key] = load_response(vault, slug, team, pos) or {}
+    prior = st.session_state[prior_key]
     pmembers = prior.get("members", {}) or {}
 
-    with st.form("student_survey"):
-        answers: Dict[str, dict] = {}
+    answers: Dict[str, dict] = {}
+    missing_ratings = 0
 
-        # ---- per-member: ratings + qualitative ----------------------------
+    # ---- per-member: ratings (radio) + qualitative --------------------------
+    for i, m in enumerate(members):
+        who = m["name"] + ("  (yourself)" if i == pos else "")
+        st.markdown(f"### {who}")
+        pa = pmembers.get(str(i), {}) or {}
+        entry: Dict = {}
+
+        if survey.get("ask_ratings", True):
+            st.caption(survey.get("ratings_prompt", ""))
+            ex_r = pa.get("ratings") or [None] * len(statements)
+            rvals = []
+            for si, stmt in enumerate(statements):
+                default_idx = None
+                if si < len(ex_r) and ex_r[si]:
+                    try:
+                        default_idx = 7 - int(ex_r[si])
+                    except Exception:
+                        default_idx = None
+                choice = st.radio(stmt, scale, index=default_idx, horizontal=True,
+                                  key=f"r_{i}_{si}")
+                if choice is None:
+                    missing_ratings += 1
+                rvals.append((7 - scale.index(choice)) if choice in scale else None)
+            entry["ratings"] = rvals
+
+        if survey.get("ask_improve", True):
+            entry["improve"] = st.text_area(
+                (survey.get("improve_prompt", "") or "").replace("{member}", m["name"]),
+                value=str(pa.get("improve", "")), key=f"imp_{i}")
+        if survey.get("ask_contribution", True):
+            entry["contribution"] = st.text_area(
+                (survey.get("contribution_prompt", "") or "").replace("{member}", m["name"]),
+                value=str(pa.get("contribution", "")), key=f"con_{i}")
+        answers[str(i)] = entry
+        st.divider()
+
+    # ---- forced ranking (radio) + live check --------------------------------
+    rank_issue = None
+    if survey.get("ask_ranking", True):
+        st.markdown("### Forced ranking")
+        st.caption(survey.get("ranking_prompt", ""))
         for i, m in enumerate(members):
-            who = m["name"] + ("  (yourself)" if i == pos else "")
-            st.markdown(f"### {who}")
             pa = pmembers.get(str(i), {}) or {}
-            entry: Dict = {}
+            exr = pa.get("rank")
+            who = m["name"] + ("  (yourself)" if i == pos else "")
+            choice = st.radio(who, cats, index=(cats.index(exr) if exr in cats else None),
+                              horizontal=True, key=f"rank_{i}")
+            answers[str(i)]["rank"] = choice if choice in cats else None
+        ranks = [answers[str(i)].get("rank") for i in range(len(members))]
+        if any(r is None for r in ranks):
+            rank_issue = "Place every team member in a ranking category."
+        elif len(members) >= len(cats) and len(set(ranks)) < len(cats):
+            rank_issue = "Use every ranking category at least once."
+        (st.warning if rank_issue else st.success)(
+            "⚠️ " + rank_issue if rank_issue else "Ranking complete.")
+        st.divider()
 
-            if survey.get("ask_ratings", True):
-                if i == 0 or survey.get("ratings_prompt"):
-                    st.caption(survey.get("ratings_prompt", ""))
-                ex_r = pa.get("ratings") or [None] * len(statements)
-                rvals = []
-                for si, stmt in enumerate(statements):
-                    default_idx = None
-                    if si < len(ex_r) and ex_r[si]:
-                        try:
-                            default_idx = 7 - int(ex_r[si])
-                        except Exception:
-                            default_idx = None
-                    choice = st.selectbox(stmt, scale, index=default_idx,
-                                          placeholder="Select…", key=f"r_{i}_{si}")
-                    rvals.append((7 - scale.index(choice)) if choice in scale else None)
-                entry["ratings"] = rvals
+    # ---- pay allocation (live running total) --------------------------------
+    allocs: Dict[str, int] = {}
+    alloc_issue = None
+    if survey.get("ask_allocation", True):
+        st.markdown("### Pay students")
+        st.caption(survey.get("allocation_prompt", ""))
+        for i, m in enumerate(members):
+            pa = pmembers.get(str(i), {}) or {}
+            who = m["name"] + ("  (yourself)" if i == pos else "")
+            allocs[str(i)] = st.number_input(who, min_value=0, max_value=total,
+                                             value=int(pa.get("alloc", 0) or 0), step=1,
+                                             key=f"alloc_{i}")
+            answers[str(i)]["alloc"] = allocs[str(i)]
+        running = sum(int(v) for v in allocs.values())
+        if running == total:
+            st.success(f"Allocated ${running} / ${total}. 👍")
+        elif running < total:
+            alloc_issue = f"${total - running} left to allocate (${running} / ${total})."
+            st.warning("⚠️ " + alloc_issue)
+        else:
+            alloc_issue = f"Over by ${running - total} (${running} / ${total})."
+            st.error("⚠️ " + alloc_issue)
+        st.divider()
 
-            if survey.get("ask_improve", True):
-                entry["improve"] = st.text_area(
-                    (survey.get("improve_prompt", "") or "").replace("{member}", m["name"]),
-                    value=str(pa.get("improve", "")), key=f"imp_{i}")
-            if survey.get("ask_contribution", True):
-                entry["contribution"] = st.text_area(
-                    (survey.get("contribution_prompt", "") or "").replace("{member}", m["name"]),
-                    value=str(pa.get("contribution", "")), key=f"con_{i}")
-            answers[str(i)] = entry
-            st.divider()
+    # ---- your own contribution ----------------------------------------------
+    self_contribution = ""
+    if survey.get("ask_self_contribution", True):
+        st.markdown("### Your contribution")
+        self_contribution = st.text_area(survey.get("self_contribution_prompt", ""),
+                                         value=str(prior.get("self_contribution", "")),
+                                         key="self_contrib")
 
-        # ---- forced ranking ----------------------------------------------
-        if survey.get("ask_ranking", True):
-            st.markdown("### Forced ranking")
-            st.caption(survey.get("ranking_prompt", ""))
-            for i, m in enumerate(members):
-                pa = pmembers.get(str(i), {}) or {}
-                exr = pa.get("rank")
-                who = m["name"] + ("  (yourself)" if i == pos else "")
-                choice = st.selectbox(who, cats,
-                                      index=(cats.index(exr) if exr in cats else None),
-                                      placeholder="Choose…", key=f"rank_{i}")
-                answers[str(i)]["rank"] = choice if choice in cats else None
-            st.divider()
+    # ---- confidential note --------------------------------------------------
+    conf = ""
+    if survey.get("ask_confidential", True):
+        st.markdown("### Confidential note to the instructor")
+        conf = st.text_area(survey.get("confidential_prompt", ""),
+                            value=str(prior.get("confidential", "")), key="conf_note")
 
-        # ---- pay allocation ----------------------------------------------
-        allocs: Dict[str, int] = {}
-        if survey.get("ask_allocation", True):
-            st.markdown("### Pay students")
-            st.caption(survey.get("allocation_prompt", ""))
-            for i, m in enumerate(members):
-                pa = pmembers.get(str(i), {}) or {}
-                who = m["name"] + ("  (yourself)" if i == pos else "")
-                allocs[str(i)] = st.number_input(who, min_value=0, max_value=total,
-                                                 value=int(pa.get("alloc", 0) or 0), step=1,
-                                                 key=f"alloc_{i}")
-                answers[str(i)]["alloc"] = allocs[str(i)]
-            st.caption(f"Total allocated: **${sum(int(v) for v in allocs.values())} / ${total}**")
-            st.divider()
+    # ---- live validation summary + gated submit -----------------------------
+    st.markdown("---")
+    problems = submission_problems(answers, survey, len(members))
+    if problems:
+        st.error("**Before you can submit:**\n\n" + "\n".join(f"- {p}" for p in problems))
+    else:
+        st.success("Everything looks complete — you're ready to submit.")
 
-        # ---- your own contribution ---------------------------------------
-        self_contribution = ""
-        if survey.get("ask_self_contribution", True):
-            st.markdown("### Your contribution")
-            self_contribution = st.text_area(survey.get("self_contribution_prompt", ""),
-                                             value=str(prior.get("self_contribution", "")),
-                                             key="self_contrib")
-
-        # ---- confidential note -------------------------------------------
-        conf = ""
-        if survey.get("ask_confidential", True):
-            st.markdown("### Confidential note to the instructor")
-            conf = st.text_area(survey.get("confidential_prompt", ""),
-                                value=str(prior.get("confidential", "")), key="conf_note")
-
-        submitted = st.form_submit_button("Submit evaluation", type="primary")
-
-    if submitted:
+    if st.button("Submit evaluation", type="primary", disabled=bool(problems)):
         if window_state(survey) != "open":
             st.warning(window_message(survey))
             return
-        if survey.get("ask_allocation", True):
-            running = sum(int(v) for v in allocs.values())
-            if running != total:
-                st.error(f"Your $ allocations total ${running}, but must total exactly "
-                         f"${total}. Please adjust and submit again.")
-                return
-        if survey.get("ask_ranking", True):
-            ranks = [answers[str(i)].get("rank") for i in range(len(members))]
-            if any(r is None for r in ranks):
-                st.error("Please place every team member in a ranking category.")
-                return
-            if len(members) >= len(cats) and len(set(ranks)) < len(cats):
-                st.error("Use every ranking category at least once.")
-                return
         record = {
             "slug": slug, "team": team, "pos": pos,
             "evaluator": me["name"], "evaluator_key": name_key(me["name"]),
@@ -723,6 +781,7 @@ def render_student_app(token: str) -> None:
         }
         try:
             save_response(vault, slug, team, pos, record)
+            st.session_state[prior_key] = record
             st.success("Thank you — your evaluation has been recorded. You may reopen "
                        "this link to revise it until the evaluation closes.")
             st.balloons()

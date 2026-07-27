@@ -47,7 +47,9 @@ def _email_for(m: StudentResult, roster: Optional[Roster]) -> str:
 
 def build_messages(teams: List[TeamResult], roster: Optional[Roster],
                    subject_t: str, body_t: str, attach_team: bool,
-                   course: str, eval_no: str) -> List[mail.Message]:
+                   course: str, eval_no: str, report: dict = None) -> List[mail.Message]:
+    """Build one email per student, attaching their feedback PDF (built with the
+    instructor's `report` display settings) and optionally the team PDF."""
     messages: List[mail.Message] = []
     team_pdf_cache: Dict[str, bytes] = {}
     for t in teams:
@@ -58,7 +60,7 @@ def build_messages(teams: List[TeamResult], roster: Optional[Roster],
             safe = m.name.replace(" ", "_").replace("/", "-")
             atts = [mail.Attachment(
                 f"{safe}_feedback.pdf",
-                pdfgen.build_individual_pdf(m, eval_no, course))]
+                pdfgen.build_individual_pdf(m, eval_no, course, report=report))]
             if attach_team:
                 atts.append(mail.Attachment(
                     f"team_{t.team}_contribution.pdf", team_pdf_cache[t.team]))
@@ -80,7 +82,6 @@ def make_mailer(cfg: AppConfig):
             return None
         return mail.SmtpMailer(cfg.email)
 
-    # Graph device-code flow
     m365 = cfg.m365
     tenant = m365.get("tenant_id", "")
     client = m365.get("client_id", "")
