@@ -17,6 +17,8 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import io
+import re
+import urllib.parse
 import zipfile
 
 import pandas as pd
@@ -226,6 +228,41 @@ a set band).
 **7. Self-evaluation** — the student's own ratings appear next to their peers' on
 their feedback sheet, so they can see the gap.
 """
+
+
+def _mailto(to, subject, body_html):
+    """A mailto: URL that opens the computer's default mail app pre-filled.
+    Body is converted to plain text (mailto can't carry HTML or attachments)."""
+    text = re.sub(r"<br\s*/?>", "\n", body_html or "")
+    text = re.sub(r"</p>", "\n\n", text)
+    text = re.sub(r"<[^>]+>", "", text).replace("&nbsp;", " ")
+    q = urllib.parse.urlencode({"subject": subject or "", "body": text},
+                               quote_via=urllib.parse.quote)
+    return f"mailto:{to}?{q}"
+
+
+def _mail_app_links(recipients, subject_t, body_t, course, eval_no, limit=80):
+    """Render clickable 'open in your mail app' links for link-only emails."""
+    st.caption("Opens your computer's default email app (Outlook, Apple Mail, …) with the "
+               "message pre-filled — you just press Send. No attachments this way; for the "
+               "results emails with PDFs, use the .eml pack.")
+    shown = 0
+    for r in recipients:
+        if not r.get("email"):
+            continue
+        ctx = {"first_name": (r.get("name", "").split(" ") or [""])[0],
+               "last_name": r.get("name", "").split(" ")[-1], "name": r.get("name", ""),
+               "team": r.get("team", ""), "eval_no": eval_no, "class": course,
+               "link": r.get("link", "")}
+        url = _mailto(r["email"], mail.render_template(subject_t, ctx),
+                      mail.render_template(body_t, ctx))
+        st.markdown(f"- [✉️ {r['name']} &lt;{r['email']}&gt;]({url})")
+        shown += 1
+        if shown >= limit:
+            st.caption(f"Showing the first {limit}.")
+            break
+    if shown == 0:
+        st.info("No recipients with an email address.")
 
 
 def _email_body(default_html, key, height=220):
@@ -547,6 +584,9 @@ with tabs[0]:
             st.download_button("⬇ Download invitation emails (zip)", S["invite_pack"],
                                f"{slug}_invitations.zip", "application/zip")
 
+        with st.expander("Or open each in your computer's mail app (mailto)"):
+            _mail_app_links(links, subj, body, course, eval_no)
+
 # =========================================================================== #
 # TAB 2 — Responses (monitor + load into grading)
 # =========================================================================== #
@@ -637,6 +677,21 @@ with tabs[1]:
                 if S.get("reminder_pack"):
                     st.download_button("⬇ Download reminder emails (zip)", S["reminder_pack"],
                                        f"{slug}_reminders.zip", "application/zip")
+
+                with st.expander("Or open each in your computer's mail app (mailto)"):
+                    from peerparley.tokens import make_token
+                    _secret = survey.token_secret(cfg)
+                    _recips = []
+                    for r in nonresp:
+                        if not r["email"]:
+                            continue
+                        _tok = make_token({"s": slug, "t": r["team"], "p": r["pos"]}, _secret)
+                        _sep = "&" if "?" in base_url else "?"
+                        _recips.append({"name": r["name"], "email": r["email"],
+                                        "team": r["team"],
+                                        "link": f"{base_url}{_sep}t={_tok}" if base_url
+                                                else f"?t={_tok}"})
+                    _mail_app_links(_recips, subj, body, course, eval_no)
 
         st.divider()
         st.markdown("##### Grade the collected responses")
@@ -891,9 +946,11 @@ with tabs[4]:
             if result["failed"]:
                 st.dataframe(pd.DataFrame(result["failed"]))
 
-        st.markdown("**Or download a results email pack (.eml folder)**")
-        st.caption("Ready-to-send .eml files, one per student, each with their feedback "
-                   "PDF attached — open in Outlook / Apple Mail. No mail server needed.")
+        st.markdown("**Or download a results email pack (.eml folder) — for your desktop mail app**")
+        st.caption("Ready-to-send .eml files, one per student, each with their feedback PDF "
+                   "attached — open in Outlook / Apple Mail / Thunderbird and press Send. "
+                   "No mail server needed. (This is the way to send results through your "
+                   "computer's mail app — a mailto link can't carry the PDF attachment.)")
         if st.button("Build results email pack (zip)", key="res_pack"):
             rep = survey.load_survey(Vault(), survey.slugify(course, eval_no)).get("report") or {}
             items = emailpack.results_items(S["teams"], S.get("roster"), subject_t, body_t,
