@@ -70,10 +70,10 @@ def letter_grade(value) -> str:
 class GradeSettings:
     team_score_default: float = 100.0
     sensitivity_B: float = 0.5
-    min_multiplier: float = 0.85
-    max_multiplier: float = 1.15
-    max_comment_points: int = 5
-    rounding_step: int = 1          # 1 or 5 (percent)
+    min_multiplier: float = 0.50    # max 50% DECREASE (deduction cap)
+    max_multiplier: float = 1.05    # max  5% INCREASE (bonus cap)
+    max_comment_points: int = 10
+    rounding_step: int = 5          # 1 or 5 (percent)
     rounding_mode: str = "nearest"  # nearest | up | down
     performance_method: str = "allocation_ratio"  # allocation_ratio|rank_linear|rank_one_mean
     performance_band: float = 0.08  # +-8%
