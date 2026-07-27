@@ -179,6 +179,22 @@ DEFAULT_INVITE_BODY = (
 )
 
 
+def _email_body(default_html, key, height=220):
+    """WYSIWYG email-body editor (Quill) that returns HTML. Falls back to a plain
+    HTML text box if the streamlit-quill component isn't available."""
+    st.caption("Formatting toolbar below. Placeholders like {first_name}, {team}, "
+               "{eval_no}, {class} and {link} are filled in per student when sent.")
+    try:
+        from streamlit_quill import st_quill
+        html = st_quill(value=st.session_state.get(f"{key}_html", default_html),
+                        html=True, key=key)
+        html = html if html else default_html
+        st.session_state[f"{key}_html"] = html
+        return html
+    except Exception:
+        return st.text_area("Body (HTML)", default_html, height=height, key=f"{key}_ta")
+
+
 EMAIL_METHODS = [("graph", "Microsoft 365 (Graph)"), ("smtp", "SMTP server (Gmail, NAU, …)")]
 
 
@@ -441,7 +457,7 @@ with tabs[0]:
                    "it has every student's link for your own mail merge.")
         subj = st.text_input("Email subject",
                              "Your peer evaluation for {class} (Eval {eval_no})", key="inv_subj")
-        body = st.text_area("Email body (HTML)", DEFAULT_INVITE_BODY, height=180, key="inv_body")
+        body = _email_body(DEFAULT_INVITE_BODY, key="inv_body")
         inv_method = _method_selector("inv_method")
         drafts_only = st.checkbox("Create Outlook drafts only (no send)",
                                   value=(inv_method == "graph"), key="inv_drafts",
@@ -508,7 +524,7 @@ with tabs[1]:
                 base_url = st.text_input("Public app URL", getattr(cfg, "public_url", "") or "", key="rem_url")
                 subj = st.text_input("Subject",
                                      "Reminder: your peer evaluation for {class}", key="rem_subj")
-                body = st.text_area("Body (HTML)", DEFAULT_INVITE_BODY, height=150, key="rem_body")
+                body = _email_body(DEFAULT_INVITE_BODY, key="rem_body", height=150)
                 rem_method = _method_selector("rem_method")
                 drafts_only = st.checkbox("Drafts only", value=(rem_method == "graph"),
                                           key="rem_drafts", disabled=(rem_method != "graph"))
@@ -686,7 +702,7 @@ with tabs[4]:
             "Best,<br>The teaching team"
         )
         subject_t = st.text_input("Subject template", default_subject)
-        body_t = st.text_area("Body template (HTML)", default_body, height=160)
+        body_t = _email_body(default_body, key="results_body", height=200)
         attach_team = st.checkbox("Attach team-contribution PDF", value=True)
 
         # live preview

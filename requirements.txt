@@ -10,3 +10,5 @@ msal>=1.28
 dropbox>=11.36
 # PDF preview (optional; app degrades gracefully if absent)
 PyMuPDF>=1.24
+# WYSIWYG email editor (app falls back to a plain HTML box if absent)
+streamlit-quill>=0.0.3
