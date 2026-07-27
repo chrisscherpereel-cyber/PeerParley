@@ -172,10 +172,10 @@ def _powershell(parts: List[dict]) -> str:
 def _applescript(parts: List[dict]) -> str:
     has_att = any(p["attachments"] for p in parts)
     lines = [
-        '-- PeerParley — send every email via Apple Mail on a Mac.',
+        '-- PeerParley — send every email via your Mac mail app.',
         '-- Open this file in Script Editor (double-click) and click Run (the ▶ button).',
-        '-- Approve the one-time prompt that lets it control Mail. Messages are sent',
-        '-- from your own Mail account.',
+        '-- You are asked which mail app to use — Microsoft Outlook by default.',
+        '-- Approve the one-time prompt that lets it control the app. Sends from your account.',
         '',
     ]
     if has_att:
@@ -189,90 +189,54 @@ def _applescript(parts: List[dict]) -> str:
         lines.append("set end of msgs to {|to|:%s, |subj|:%s, |body|:%s, |atts|:%s}" % (
             _as_str(p["to"]), _as_str(p["subject"]), _as_str(_strip_html(p["body"])), atts))
     lines += [
+        'set appPick to (choose from list {"Microsoft Outlook", "Apple Mail"} '
+        'with prompt "Send all of these using which mail app?" '
+        'default items {"Microsoft Outlook"})',
+        'if appPick is false then return',
+        'set appPick to item 1 of appPick',
         'set sentCount to 0',
-        'tell application "Mail"',
-        '  repeat with m in msgs',
-        '    if (|to| of m) is not "" then',
-        '      set newMsg to make new outgoing message with properties '
-        '{subject:(|subj| of m), content:(|body| of m), visible:false}',
-        '      tell newMsg',
-        '        make new to recipient at end of to recipients with properties '
-        '{address:(|to| of m)}',
+        'if appPick is "Microsoft Outlook" then',
+        '  tell application "Microsoft Outlook"',
+        '    repeat with m in msgs',
+        '      if (|to| of m) is not "" then',
+        '        set newMsg to make new outgoing message with properties '
+        '{subject:(|subj| of m), plain text content:(|body| of m)}',
+        '        make new recipient at newMsg with properties '
+        '{email address:{address:(|to| of m)}}',
         '        repeat with a in (|atts| of m)',
         '          try',
-        '            make new attachment with properties '
-        '{file name:(POSIX file (folderPath & (a as text)))} at after the last paragraph',
+        '            make new attachment at newMsg with properties '
+        '{file:(POSIX file (folderPath & (a as text)))}',
         '          end try',
         '        end repeat',
-        '      end tell',
-        '      send newMsg',
-        '      set sentCount to sentCount + 1',
-        '    end if',
-        '  end repeat',
-        'end tell',
-        'display dialog "Sent " & sentCount & " message(s) via Apple Mail." '
-        'buttons {"OK"} default button "OK"',
-    ]
-    return "\n".join(lines) + "\n"
-
-
-def _sh(s: str) -> str:
-    """A safely single-quoted POSIX-shell argument."""
-    return "'" + (s or "").replace("'", "'\\''") + "'"
-
-
-# A FIXED AppleScript (no data embedded) — takes each message as arguments, so
-# the data can never introduce a syntax error. Driven by the .command below.
-_MAC_APPLESCRIPT_ARGV = (
-    "on run argv\n"
-    "  set theTo to item 1 of argv\n"
-    "  set theSubj to item 2 of argv\n"
-    "  set theBody to item 3 of argv\n"
-    "  set folderPath to item 4 of argv\n"
-    "  tell application \"Mail\"\n"
-    "    set newMsg to make new outgoing message with properties "
-    "{subject:theSubj, content:theBody, visible:false}\n"
-    "    tell newMsg\n"
-    "      make new to recipient at end of to recipients with properties {address:theTo}\n"
-    "      repeat with i from 5 to (count of argv)\n"
-    "        try\n"
-    "          make new attachment with properties "
-    "{file name:(POSIX file (folderPath & (item i of argv)))} at after the last paragraph\n"
-    "        end try\n"
-    "      end repeat\n"
-    "    end tell\n"
-    "    send newMsg\n"
-    "  end tell\n"
-    "end run\n"
-)
-
-
-def _command(parts: List[dict]) -> str:
-    """A double-clickable macOS .command (bash) that sends every message via Mail.
-    All data lives in the shell (safely quoted); it calls a fixed AppleScript."""
-    lines = [
-        "#!/bin/bash",
-        "# PeerParley — double-click to send every email via Apple Mail.",
-        "# First time: if it won't open, right-click the file -> Open, then click Open.",
-        'cd "$(dirname "$0")" || exit 1',
-        'DIR="$(pwd)/"',
-        'AS="$(mktemp /tmp/pp_send.XXXXXX)"',
-        "cat > \"$AS\" <<'APPLESCRIPT'",
-        _MAC_APPLESCRIPT_ARGV.rstrip("\n"),
-        "APPLESCRIPT",
-        "SENT=0",
-    ]
-    for p in parts:
-        if not p["to"]:
-            continue
-        args = [_sh(p["to"]), _sh(p["subject"]), _sh(_strip_html(p["body"])), '"$DIR"']
-        args += [_sh(fn) for fn, _ in p["attachments"]]
-        lines.append('osascript "$AS" ' + " ".join(args) + " && SENT=$((SENT+1))")
-    lines += [
-        'rm -f "$AS"',
-        'echo "Sent $SENT message(s) via Apple Mail."',
-        'read -n 1 -s -r -p "Done — press any key to close."',
-        "echo",
+        '        send newMsg',
+        '        set sentCount to sentCount + 1',
+        '      end if',
+        '    end repeat',
+        '  end tell',
+        'else',
+        '  tell application "Mail"',
+        '    repeat with m in msgs',
+        '      if (|to| of m) is not "" then',
+        '        set newMsg to make new outgoing message with properties '
+        '{subject:(|subj| of m), content:(|body| of m), visible:false}',
+        '        tell newMsg',
+        '          make new to recipient at end of to recipients with properties '
+        '{address:(|to| of m)}',
+        '          repeat with a in (|atts| of m)',
+        '            try',
+        '              make new attachment with properties '
+        '{file name:(POSIX file (folderPath & (a as text)))} at after the last paragraph',
+        '            end try',
+        '          end repeat',
+        '        end tell',
+        '        send newMsg',
+        '        set sentCount to sentCount + 1',
+        '      end if',
+        '    end repeat',
+        '  end tell',
+        'end if',
+        'display dialog "Sent " & sentCount & " message(s)." buttons {"OK"} default button "OK"',
     ]
     return "\n".join(lines) + "\n"
 
@@ -282,11 +246,11 @@ _README = (
     "===========================\n\n"
     "This folder sends every email for you through the mail app already on your\n"
     "computer. UNZIP it first (don't run anything from inside the .zip), then:\n\n"
-    "  MAC (easiest):   double-click 'send_all_mac.command'. If macOS blocks it the\n"
-    "                   first time, right-click it -> Open -> Open. A Terminal window\n"
-    "                   runs it and reports how many were sent.\n"
-    "  MAC (alt):       open 'send_all_mac.applescript' in Script Editor, click Run.\n"
-    "  WINDOWS:         right-click 'send_all_windows.ps1' -> Run with PowerShell.\n\n"
+    "  MAC (Outlook or Apple Mail):  open 'send_all_mac.applescript' in Script Editor\n"
+    "                                (double-click it), click Run. Pick your mail app\n"
+    "                                when asked (Microsoft Outlook is the default).\n"
+    "  WINDOWS (Outlook):            right-click 'send_all_windows.ps1' -> Run with\n"
+    "                                PowerShell.\n\n"
     "The first time, your computer asks permission to let it control the mail app —\n"
     "approve it. Messages are sent from your own account, with the PDFs in this\n"
     "folder attached. Prefer to review first? The same emails are also available as\n"
@@ -295,7 +259,7 @@ _README = (
 
 
 def send_all_pack(parts: List[dict], folder_label: str = "Emails") -> bytes:
-    """Zip with attachment PDFs + Windows, Mac (.command + .applescript) send-all scripts."""
+    """Zip with attachment PDFs + a Windows (Outlook) and a Mac (Outlook/Mail) script."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         seen = set()
@@ -306,10 +270,5 @@ def send_all_pack(parts: List[dict], folder_label: str = "Emails") -> bytes:
                     seen.add(fname)
         z.writestr("send_all_windows.ps1", _powershell(parts))
         z.writestr("send_all_mac.applescript", _applescript(parts))
-        # .command must be executable so a double-click runs it
-        info = zipfile.ZipInfo("send_all_mac.command")
-        info.external_attr = (0o755 & 0xFFFF) << 16
-        info.compress_type = zipfile.ZIP_DEFLATED
-        z.writestr(info, _command(parts))
         z.writestr("READ ME FIRST.txt", _README)
     return buf.getvalue()
