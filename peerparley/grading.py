@@ -1,13 +1,17 @@
 """Grading engine.
 
 Peer-allocation method: each student distributes 100 points across teammates.
-Individual score = Team Score x [1 + B * A * Q * (peer_ratio - 1)], capped to
+Individual score = Team Score x [1 + B * A * Q * (pay_grade - 1)], capped to
 configurable min/max multipliers.
 
-  peer_ratio  : points a student RECEIVED / expected fair share
+  pay_grade   : a student's average received allocation / the TEAM average
+                (100% = exactly average). Above average → bonus; below → deduction;
+                exactly average → no change. Being relative to the team average, the
+                whole team can never be pushed into a deduction by self-allocations.
   B           : global sensitivity (how much peer input moves the grade)
-  A           : agreement weight from SD of received points (evaluator consensus)
+  A           : agreement weight from SD of received points (evaluator consensus, ≤1)
   Q           : comment support score for that student (0..1), from comments.py
+                (A and Q only shrink the adjustment; they never flip its sign)
 
 In addition — reproducing the original PeerParley workbook — this engine also
 computes, when the survey collected them:
@@ -71,9 +75,13 @@ class GradeSettings:
     max_comment_points: int = 5
     rounding_step: int = 1          # 1 or 5 (percent)
     rounding_mode: str = "nearest"  # nearest | up | down
-    performance_method: str = "allocation_ratio"  # allocation_ratio|composite|rank_linear|rank_one_mean
+    performance_method: str = "allocation_ratio"  # allocation_ratio|rank_linear|rank_one_mean
     performance_band: float = 0.08  # +-8%
     agreement_guard: bool = True
+    # Which peer measure drives the grade adjustment (the normalized peer factor):
+    #   allocation | rating | ranking | combined
+    adjustment_source: str = "allocation"
+    normalize_raters: bool = False   # z-score each evaluator (corrects for leniency)
 
 
 def agreement_weight(received: List[float], expected_share: float) -> float:
@@ -290,6 +298,51 @@ def compute(
         ranking = sorted(member_keys, key=lambda k: received_avgs.get(k, 0), reverse=True)
         rank_of = {k: i + 1 for i, k in enumerate(ranking)}
 
+        # ---- alternative peer-adjustment measures (each a normalized peer factor:
+        #      a student's peer score ÷ the team average, so 1.0 = average) --------
+        member_rating = {}   # mean of the four 0-1 dimension scores
+        for k in member_keys:
+            _rv = [float(np.mean(dims[k][d])) / 7.0 for d in range(4) if dims[k][d]]
+            member_rating[k] = float(np.mean(_rv)) if _rv else float("nan")
+        member_rankscore = {}  # (3 - mean forced rank)/2  → High 1.0 · Adequate 0.5 · Low 0.0
+        for k in member_keys:
+            member_rankscore[k] = ((3.0 - float(np.mean(ranks_recv[k]))) / 2.0) \
+                if ranks_recv[k] else float("nan")
+
+        alloc_source, alloc_team = dict(received_avgs), team_avg
+        if settings.normalize_raters:  # z-score each evaluator (removes leniency)
+            given: Dict[str, List[float]] = {}
+            for _, r in tdf.iterrows():
+                v = _num(r.get("points"))
+                if v is not None:
+                    given.setdefault(r["evaluator_key"], []).append(v)
+            zstat = {e: (float(np.mean(g)), float(np.std(g)) if len(g) > 1 else 0.0)
+                     for e, g in given.items()}
+            zrec: Dict[str, List[float]] = {k: [] for k in member_keys}
+            for _, r in tdf.iterrows():
+                v = _num(r.get("points"))
+                if v is None:
+                    continue
+                mu, sd = zstat.get(r["evaluator_key"], (0.0, 0.0))
+                zrec.setdefault(r["evaluatee_key"], []).append(((v - mu) / sd) if sd > 0 else 0.0)
+            alloc_source = {k: (1.0 + float(np.mean(zrec[k]))) if zrec.get(k) else 1.0
+                            for k in member_keys}
+            alloc_team = 1.0
+
+        _rt = [v for v in member_rating.values() if v == v]
+        rating_team = float(np.mean(_rt)) if _rt else float("nan")
+        _kt = [v for v in member_rankscore.values() if v == v]
+        rank_team = float(np.mean(_kt)) if _kt else float("nan")
+
+        def _factor(x, avg):
+            try:
+                if x is None or math.isnan(float(x)) or avg is None or math.isnan(float(avg)) \
+                        or avg == 0:
+                    return None
+            except (TypeError, ValueError):
+                return None
+            return float(x) / float(avg)
+
         members: List[StudentResult] = []
         for k in member_keys:
             all_pub = pub.get(k, [])
@@ -299,12 +352,11 @@ def compute(
                 cs = score_comment(c, others, settings.max_comment_points)
                 if cs.q >= best_q:
                     best_q, best_pts = cs.q, cs.points
-            Q = best_q if all_pub else 0.5
+            Q = best_q if all_pub else 1.0   # neutral when no comments were written about them
 
             rec = received.get(k, [])
             received_total = float(np.sum(rec)) if rec else 0.0
             ravg = received_avgs.get(k, 0.0)
-            peer_ratio = (ravg / expected_share) if expected_share > 0 else 1.0
             A = agreement_weight(rec, expected_share)
 
             # ---- dimension grades from the rating matrix ----
@@ -325,10 +377,34 @@ def compute(
                 if settings.agreement_guard and perf == "Low" and A <= 0.5:
                     perf = "Expected"
 
-            # ---- pay grade (relative to team average) ----
-            pay_grade = (ravg / team_avg) if team_avg > 0 else float("nan")
+            # ---- pay grade = share of the team average ($100 allocation) ----------
+            # Always shown to students (100% = an even share). Its ratio also drives
+            # the grade when the "allocation" method is chosen.
+            pay_grade = (ravg / team_avg) if team_avg > 0 else 1.0
 
-            raw_mult = 1 + settings.sensitivity_B * A * Q * (peer_ratio - 1)
+            # ---- rel = the chosen peer factor (1.0 = team average) ----------------
+            # A student ABOVE the team average (rel > 1) earns a bonus; BELOW takes a
+            # deduction; exactly average gets no change. Being relative to the team
+            # average, self-allocations or abstentions can't push a whole team down.
+            paf_alloc = _factor(alloc_source.get(k), alloc_team)
+            paf_rating = _factor(member_rating.get(k), rating_team)
+            paf_rank = _factor(member_rankscore.get(k), rank_team)
+            src = settings.adjustment_source
+            if src == "rating":
+                rel = paf_rating if paf_rating is not None else (paf_alloc or 1.0)
+            elif src == "ranking":
+                rel = paf_rank if paf_rank is not None else (paf_alloc or 1.0)
+            elif src == "combined":
+                _parts = [p for p in (paf_alloc, paf_rating) if p is not None]
+                rel = (sum(_parts) / len(_parts)) if _parts else 1.0
+            else:  # allocation (default)
+                rel = paf_alloc if paf_alloc is not None else 1.0
+            peer_ratio = rel
+
+            # Grade adjustment centred on the team average, scaled by sensitivity B,
+            # then dampened by evaluator agreement A and comment support Q (both ≤ 1,
+            # so they only shrink the adjustment — they never flip its sign).
+            raw_mult = 1 + settings.sensitivity_B * A * Q * (rel - 1)
             mult = max(settings.min_multiplier, min(settings.max_multiplier, raw_mult))
             individual = ts * mult
             signed = _round_pct(individual - ts, settings.rounding_step, settings.rounding_mode)
@@ -404,7 +480,6 @@ def results_to_frame(teams: List[TeamResult]) -> pd.DataFrame:
                 "Quality": m.quality,
                 "Effect": m.effect,
                 "Pay Grade": _pct(m.pay_grade),
-                "Peer Ratio": m.peer_ratio,
                 "A (agreement)": m.A,
                 "Q (support)": m.Q,
                 "Response Pts": m.response_points,
