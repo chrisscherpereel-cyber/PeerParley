@@ -203,9 +203,10 @@ or a combination. Whichever you pick, it works the same way:
 > adjustment ≈ **sensitivity** × (peer factor − 100%)
 
 So a student **above** the team average gets a **bonus (+%)**, one **below** gets a
-**deduction (−%)**, and one exactly average gets **0%**. It's capped at the maximum
-you set (default **±15%**). Two optional weights can only *shrink* the adjustment,
-never flip its sign:
+**deduction (−%)**, and one exactly average gets **0%**. The bonus and the
+deduction are capped **separately** — by default a top student can rise at most
+**+5%**, while a low student can fall at most **−50%**. Two optional weights can
+only *shrink* the adjustment, never flip its sign:
 
 - **Agreement (A)** — if evaluators strongly *disagree* about a student, their
   adjustment is softened (they got mixed signals).
@@ -265,6 +266,106 @@ def _mail_app_links(recipients, subject_t, body_t, course, eval_no, limit=80):
         st.info("No recipients with an email address.")
 
 
+_LINK_METHODS = ["Microsoft 365 — send now", "SMTP — send now",
+                 "Open in my mail app (mailto)", "Download .eml files",
+                 "Download auto-send scripts (Mac / Windows)", "Download links CSV"]
+_RESULT_METHODS = ["Microsoft 365 — send now", "SMTP — send now",
+                   "Download .eml files", "Download auto-send scripts (Mac / Windows)",
+                   "Download recipients CSV"]
+
+
+def _api_and_drafts(method_label, key):
+    api = "graph" if method_label.startswith("Microsoft") else "smtp"
+    drafts = False
+    if api == "graph":
+        drafts = st.checkbox("Create Outlook drafts only (don't send yet)",
+                             value=True, key=f"{key}_d")
+    return api, drafts
+
+
+def _link_delivery(key, recipients, subj, body, course, eval_no, base_ok, label):
+    """One dropdown for how to send an invitation/reminder (link-only) email."""
+    m = st.selectbox("How do you want to send?", _LINK_METHODS, key=f"{key}_m")
+    if m.startswith(("Microsoft", "SMTP")):
+        api, drafts = _api_and_drafts(m, key)
+        if st.button("Send now", type="primary", key=f"{key}_go"):
+            if not base_ok:
+                st.error("Enter the public app URL above first — the links need a destination.")
+            else:
+                msgs = []
+                for r in recipients:
+                    if not r.get("email"):
+                        continue
+                    ctx = {"first_name": r["name"].split(" ")[0], "last_name": r["name"].split(" ")[-1],
+                           "name": r["name"], "team": r["team"], "eval_no": eval_no,
+                           "class": course, "link": r.get("link", "")}
+                    msgs.append(mail.Message(
+                        to_email=r["email"], to_name=r["name"], team=r["team"],
+                        subject=mail.render_template(subj, ctx),
+                        body=mail.render_template(body, ctx), attachments=[]))
+                _deliver(msgs, api, drafts, ok_label=f"{label} delivered")
+    elif m.startswith("Open in my mail app"):
+        _mail_app_links(recipients, subj, body, course, eval_no)
+    elif m.startswith("Download .eml"):
+        if st.button("Build .eml files", key=f"{key}_eml"):
+            st.session_state[f"{key}_emlzip"] = emailpack.zip_folders(
+                {label: emailpack.invite_items(recipients, subj, body, course, eval_no)})
+        if st.session_state.get(f"{key}_emlzip"):
+            st.download_button("⬇ Download .eml zip", st.session_state[f"{key}_emlzip"],
+                               f"{label.lower()}_eml.zip", "application/zip")
+    elif m.startswith("Download auto-send"):
+        if st.button("Build auto-send scripts", key=f"{key}_auto"):
+            st.session_state[f"{key}_autozip"] = emailpack.send_all_pack(
+                emailpack.invite_parts(recipients, subj, body, course, eval_no), label)
+        if st.session_state.get(f"{key}_autozip"):
+            st.download_button("⬇ Download auto-send zip", st.session_state[f"{key}_autozip"],
+                               f"{label.lower()}_autosend.zip", "application/zip")
+    else:  # links CSV
+        df = pd.DataFrame([{"Team": r["team"], "Name": r["name"],
+                            "Email": r.get("email", ""), "Link": r.get("link", "")}
+                           for r in recipients])
+        st.download_button("⬇ Download links CSV", df.to_csv(index=False),
+                           f"{label.lower()}_links.csv", "text/csv")
+
+
+def _results_delivery(key, teams, roster, subj, body, attach_team, course, eval_no, report):
+    """One dropdown for how to send the feedback (results, with PDF attachments)."""
+    m = st.selectbox("How do you want to send the feedback?", _RESULT_METHODS, key=f"{key}_m")
+    if m.startswith(("Microsoft", "SMTP")):
+        api, drafts = _api_and_drafts(m, key)
+        if st.button("Send now", type="primary", key=f"{key}_go"):
+            msgs = _build_messages(teams, roster, subj, body, attach_team, course, eval_no,
+                                   report=report)
+            _deliver(msgs, api, drafts, ok_label="Feedback delivered")
+    elif m.startswith("Download .eml"):
+        if st.button("Build .eml files", key=f"{key}_eml"):
+            st.session_state[f"{key}_emlzip"] = emailpack.zip_folders({"Results":
+                emailpack.results_items(teams, roster, subj, body, attach_team,
+                                        course, eval_no, report=report)})
+        if st.session_state.get(f"{key}_emlzip"):
+            st.download_button("⬇ Download .eml zip", st.session_state[f"{key}_emlzip"],
+                               "results_eml.zip", "application/zip")
+    elif m.startswith("Download auto-send"):
+        if st.button("Build auto-send scripts", key=f"{key}_auto"):
+            st.session_state[f"{key}_autozip"] = emailpack.send_all_pack(
+                emailpack.results_parts(teams, roster, subj, body, attach_team,
+                                        course, eval_no, report=report), "Results")
+        if st.session_state.get(f"{key}_autozip"):
+            st.download_button("⬇ Download auto-send zip", st.session_state[f"{key}_autozip"],
+                               "results_autosend.zip", "application/zip")
+    else:  # recipients CSV
+        rows = []
+        for t in teams:
+            for mm in t.members:
+                cx = _ctx(mm, course, eval_no)
+                rec = roster.match(mm.name) if roster else None
+                rows.append({"Team": t.team, "Name": mm.name, "Email": (rec or {}).get("email", ""),
+                             "Subject": mail.render_template(subj, cx),
+                             "Body": mail.render_template(body, cx)})
+        st.download_button("⬇ Download recipients CSV", pd.DataFrame(rows).to_csv(index=False),
+                           "results_recipients.csv", "text/csv")
+
+
 def _email_body(default_html, key, height=220):
     """WYSIWYG email-body editor (Quill) that returns HTML. Falls back to a plain
     HTML text box if the streamlit-quill component isn't available."""
@@ -288,19 +389,6 @@ def _mailer_for(method):
     """Build a mailer for the chosen method, overriding the secrets default."""
     c = dataclasses.replace(cfg, email=dataclasses.replace(cfg.email, mode=method))
     return _make_mailer(c)
-
-
-def _method_selector(key):
-    """A 'Send via' picker; defaults to the secrets email.mode."""
-    keys = [k for k, _ in EMAIL_METHODS]
-    labels = {k: v for k, v in EMAIL_METHODS}
-    default = cfg.email.mode if cfg.email.mode in labels else "graph"
-    m = st.selectbox("Send via", keys, index=keys.index(default),
-                     format_func=lambda k: labels[k], key=key)
-    if m == "smtp":
-        st.caption("SMTP reads host/port/username/password from your secrets "
-                   "([email] mode/smtp_*). Nothing is typed here.")
-    return m
 
 
 def _deliver(messages, method, drafts_only, ok_label="Done"):
@@ -539,60 +627,13 @@ with tabs[0]:
     if cdf is not None:
         links = survey.student_links(base_url, slug, survey.build_teams(cdf),
                                      survey.token_secret(cfg))
-        links_df = pd.DataFrame(links)
         with st.expander(f"Preview {len(links)} links"):
-            st.dataframe(links_df, use_container_width=True, height=280)
-            st.download_button("⬇ links.csv", links_df.to_csv(index=False),
-                               f"{slug}_links.csv", "text/csv")
-        st.caption("No mail server? Skip this and just use the **links.csv** above — "
-                   "it has every student's link for your own mail merge.")
+            st.dataframe(pd.DataFrame(links), use_container_width=True, height=280)
         subj = st.text_input("Email subject",
                              "Your peer evaluation for {class} (Eval {eval_no})", key="inv_subj")
         body = _email_body(DEFAULT_INVITE_BODY, key="inv_body")
-        inv_method = _method_selector("inv_method")
-        drafts_only = st.checkbox("Create Outlook drafts only (no send)",
-                                  value=(inv_method == "graph"), key="inv_drafts",
-                                  disabled=(inv_method != "graph"))
-        if st.button("Build & deliver links", key="inv_go"):
-            if not base_url.strip():
-                st.error("Enter the public app URL first, or the links won't point anywhere.")
-            else:
-                msgs = []
-                for r in links:
-                    if not r["email"]:
-                        continue
-                    ctx = {"first_name": r["name"].split(" ")[0], "last_name": r["name"].split(" ")[-1],
-                           "name": r["name"], "team": r["team"], "eval_no": eval_no,
-                           "class": course, "link": r["link"]}
-                    msgs.append(mail.Message(
-                        to_email=r["email"], to_name=r["name"], team=r["team"],
-                        subject=mail.render_template(subj, ctx),
-                        body=mail.render_template(body, ctx), attachments=[]))
-                _deliver(msgs, inv_method, drafts_only and inv_method == "graph",
-                         ok_label="Links delivered")
-
-        st.markdown("**Or download an invitation email pack (.eml folder)**")
-        st.caption("Ready-to-send .eml files (one per student) to open in Outlook / "
-                   "Apple Mail — no mail server needed.")
-        if st.button("Build invitation email pack (zip)", key="inv_pack"):
-            if not base_url.strip():
-                st.error("Enter the public app URL first, or the links won't point anywhere.")
-            else:
-                items = emailpack.invite_items(links, subj, body, course, eval_no)
-                S["invite_pack"] = emailpack.zip_folders({"Invitations": items})
-        if S.get("invite_pack"):
-            st.download_button("⬇ Download invitation emails (zip)", S["invite_pack"],
-                               f"{slug}_invitations.zip", "application/zip")
-
-        with st.expander("Or open each in your computer's mail app (mailto)"):
-            _mail_app_links(links, subj, body, course, eval_no)
-
-        if st.button("Build invitation auto-send pack (Mac + Windows scripts)", key="inv_auto"):
-            parts = emailpack.invite_parts(links, subj, body, course, eval_no)
-            S["invite_autopack"] = emailpack.send_all_pack(parts, "Invitations")
-        if S.get("invite_autopack"):
-            st.download_button("⬇ Download invitation auto-send pack (zip)", S["invite_autopack"],
-                               f"{slug}_invitations_autosend.zip", "application/zip")
+        _link_delivery("inv", links, subj, body, course, eval_no, bool(base_url.strip()),
+                       "Invitations")
 
 # =========================================================================== #
 # TAB 2 — Responses (monitor + load into grading)
@@ -638,74 +679,23 @@ with tabs[1]:
                                pd.DataFrame(nonresp).to_csv(index=False),
                                f"{slug}_nonresponders.csv", "text/csv")
             with st.expander("Send a reminder to non-responders"):
-                base_url = st.text_input("Public app URL", getattr(cfg, "public_url", "") or "", key="rem_url")
+                base_url = st.text_input("Public app URL", getattr(cfg, "public_url", "") or "",
+                                         key="rem_url")
                 subj = st.text_input("Subject",
                                      "Reminder: your peer evaluation for {class}", key="rem_subj")
                 body = _email_body(DEFAULT_INVITE_BODY, key="rem_body", height=150)
-                rem_method = _method_selector("rem_method")
-                drafts_only = st.checkbox("Drafts only", value=(rem_method == "graph"),
-                                          key="rem_drafts", disabled=(rem_method != "graph"))
-                if st.button("Send reminders", key="rem_go"):
-                    snap = survey.load_roster_snapshot(vault, slug) or {"teams": {}}
-                    teams = snap.get("teams", {})
-                    secret = survey.token_secret(cfg)
-                    msgs = []
-                    for r in nonresp:
-                        if not r["email"]:
-                            continue
-                        from peerparley.tokens import make_token
-                        tok = make_token({"s": slug, "t": r["team"], "p": r["pos"]}, secret)
-                        sep = "&" if "?" in base_url else "?"
-                        link = f"{base_url}{sep}t={tok}" if base_url else f"?t={tok}"
-                        ctx = {"first_name": r["name"].split(" ")[0], "name": r["name"],
-                               "team": r["team"], "eval_no": eval_no, "class": course, "link": link}
-                        msgs.append(mail.Message(
-                            to_email=r["email"], to_name=r["name"], team=r["team"],
-                            subject=mail.render_template(subj, ctx),
-                            body=mail.render_template(body, ctx), attachments=[]))
-                    _deliver(msgs, rem_method, drafts_only and rem_method == "graph",
-                             ok_label="Reminders delivered")
-
-                st.markdown("**Or download a reminder email pack (.eml folder)**")
-                if st.button("Build reminder email pack (zip)", key="rem_pack"):
-                    from peerparley.tokens import make_token
-                    secret = survey.token_secret(cfg)
-                    recips = []
-                    for r in nonresp:
-                        if not r["email"]:
-                            continue
-                        tok = make_token({"s": slug, "t": r["team"], "p": r["pos"]}, secret)
-                        sep = "&" if "?" in base_url else "?"
-                        link = f"{base_url}{sep}t={tok}" if base_url else f"?t={tok}"
-                        recips.append({"name": r["name"], "email": r["email"],
-                                       "team": r["team"], "link": link})
-                    items = emailpack.invite_items(recips, subj, body, course, eval_no)
-                    S["reminder_pack"] = emailpack.zip_folders({"Reminders": items})
-                if S.get("reminder_pack"):
-                    st.download_button("⬇ Download reminder emails (zip)", S["reminder_pack"],
-                                       f"{slug}_reminders.zip", "application/zip")
-
-                with st.expander("Or open each in your computer's mail app (mailto)"):
-                    from peerparley.tokens import make_token
-                    _secret = survey.token_secret(cfg)
-                    _recips = []
-                    for r in nonresp:
-                        if not r["email"]:
-                            continue
-                        _tok = make_token({"s": slug, "t": r["team"], "p": r["pos"]}, _secret)
-                        _sep = "&" if "?" in base_url else "?"
-                        _recips.append({"name": r["name"], "email": r["email"],
-                                        "team": r["team"],
-                                        "link": f"{base_url}{_sep}t={_tok}" if base_url
-                                                else f"?t={_tok}"})
-                    _mail_app_links(_recips, subj, body, course, eval_no)
-                    if st.button("Build reminder auto-send pack (Mac + Windows)", key="rem_auto"):
-                        parts = emailpack.invite_parts(_recips, subj, body, course, eval_no)
-                        S["reminder_autopack"] = emailpack.send_all_pack(parts, "Reminders")
-                    if S.get("reminder_autopack"):
-                        st.download_button("⬇ Download reminder auto-send pack (zip)",
-                                           S["reminder_autopack"],
-                                           f"{slug}_reminders_autosend.zip", "application/zip")
+                from peerparley.tokens import make_token
+                _secret = survey.token_secret(cfg)
+                _recips = []
+                for r in nonresp:
+                    if not r["email"]:
+                        continue
+                    _tok = make_token({"s": slug, "t": r["team"], "p": r["pos"]}, _secret)
+                    _sep = "&" if "?" in base_url else "?"
+                    _recips.append({"name": r["name"], "email": r["email"], "team": r["team"],
+                                    "link": f"{base_url}{_sep}t={_tok}" if base_url else f"?t={_tok}"})
+                _link_delivery("rem", _recips, subj, body, course, eval_no,
+                               bool(base_url.strip()), "Reminders")
 
         st.divider()
         st.markdown("##### Grade the collected responses")
@@ -750,19 +740,25 @@ with tabs[2]:
              "way. See the explainer above and GRADING.md for the research behind each.")
 
     st.markdown("##### Main settings")
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     with c1:
         B = st.slider("Sensitivity (how strongly peers move the grade)",
                       0.0, 1.5, 0.5, 0.05,
                       help="0 = peers don't move the grade at all; 1 = full effect. This is "
                            "the WebPA/SPARK 'weighting fraction'.")
     with c2:
-        max_adj = st.slider("Maximum adjustment (± %)", 0, 30, 15, 1,
-                            help="Caps how far above/below the team score any grade can move.")
-    with c3:
-        maxpts = st.number_input("Points for feedback quality", 1, 20, 5,
+        maxpts = st.number_input("Points for feedback quality", 1, 40, 10,
                                  help="Points a student earns for the quality of the "
                                       "feedback THEY wrote about teammates.")
+    c3, c4 = st.columns(2)
+    with c3:
+        max_inc = st.slider("Maximum INCREASE (bonus cap, %)", 0, 50, 5, 1,
+                            help="The most a top student's grade can rise above the team "
+                                 "score. Default 5%.")
+    with c4:
+        max_dec = st.slider("Maximum DECREASE (deduction cap, %)", 0, 100, 50, 1,
+                            help="The most a low student's grade can fall below the team "
+                                 "score. Default 50%.")
 
     with st.expander("Advanced options (most instructors leave these alone)"):
         team_default = st.number_input("Default team score (before peer adjustment)",
@@ -787,20 +783,20 @@ with tabs[2]:
                  "this only applies otherwise.")
         band = st.slider("Performance band ± (for the average-based label)",
                          0.0, 0.25, 0.08, 0.01)
-        rstep = st.selectbox("Round adjustments to", [1, 5], index=0,
+        rstep = st.selectbox("Round adjustments to", [1, 5], index=1,
                              format_func=lambda x: f"{x}%")
         rmode = st.selectbox("Rounding direction", ["nearest", "up", "down"])
 
     S["settings"] = GradeSettings(
         team_score_default=team_default, sensitivity_B=B,
-        min_multiplier=1 - max_adj / 100.0, max_multiplier=1 + max_adj / 100.0,
+        min_multiplier=1 - max_dec / 100.0, max_multiplier=1 + max_inc / 100.0,
         max_comment_points=int(maxpts), rounding_step=int(rstep), rounding_mode=rmode,
         performance_method=perf_method, performance_band=band, agreement_guard=guard,
         adjustment_source=adj_source, normalize_raters=normalize,
     )
-    st.success(f"Method: **{adj_source}** · grades move at most **±{max_adj}%** from the "
-               "team score, centred on the team average (above average → bonus, below → "
-               "deduction).")
+    st.success(f"Method: **{adj_source}** · a top student can rise at most **+{max_inc}%** "
+               f"and a low student can fall at most **−{max_dec}%** from the team score "
+               f"(rounded to {rstep}%), based on their share of the team average.")
 
 # =========================================================================== #
 # TAB 4 — Review + PDFs
@@ -910,84 +906,9 @@ with tabs[4]:
             st.write("**Subject:** " + mail.render_template(subject_t, ctx))
             st.markdown(mail.render_template(body_t, ctx), unsafe_allow_html=True)
 
-        # recipients CSV — for your own mail merge (parallels the invites links.csv)
-        _roster = S.get("roster")
-        _rows = []
-        for _t in S["teams"]:
-            for _m in _t.members:
-                _cx = _ctx(_m, course, eval_no)
-                _rec = _roster.match(_m.name) if _roster else None
-                _rows.append({"Team": _t.team, "Name": _m.name,
-                              "Email": (_rec or {}).get("email", ""),
-                              "Subject": mail.render_template(subject_t, _cx),
-                              "Body": mail.render_template(body_t, _cx),
-                              "Individual PDF": f"{_m.name.replace(' ', '_')}_feedback.pdf"})
-        st.download_button("⬇ recipients.csv (name · email · rendered subject/body)",
-                           pd.DataFrame(_rows).to_csv(index=False),
-                           f"peerparley_results_recipients_eval{eval_no}.csv", "text/csv")
-        st.caption("Prefer not to email from the app? Download **recipients.csv** here and "
-                   "the **PDF bundle** on the Results tab, and send them yourself.")
-
-        method = _method_selector("results_method")
-        colx, coly = st.columns(2)
-        drafts_only = colx.checkbox("Create Outlook drafts only (no send)",
-                                    value=(method == "graph"), disabled=(method != "graph"))
-        go = coly.button("Build messages & deliver", type="primary")
-
-        if go:
-            roster = S.get("roster")
-            report = survey.load_survey(Vault(), survey.slugify(course, eval_no)).get("report") or {}
-            messages = _build_messages(S["teams"], roster, subject_t, body_t,
-                                       attach_team, course, eval_no, report=report)
-            st.write(f"Prepared {len(messages)} messages.")
-            mailer = _mailer_for(method)
-            if mailer is None:
-                st.stop()
-            drafts_only = drafts_only and method == "graph"
-            prog = st.progress(0.0)
-            log = st.empty()
-            lines = []
-
-            def _cb(i, total, status):
-                prog.progress(i / total)
-                lines.append(status)
-                log.code("\n".join(lines[-12:]))
-
-            result = mail.batch_send(messages, mailer, drafts_only=drafts_only,
-                                     progress=_cb)
-            st.success(f"Done — sent {result['sent']}, drafted {result['drafted']}, "
-                       f"failed {len(result['failed'])} of {result['total']}.")
-            if result["failed"]:
-                st.dataframe(pd.DataFrame(result["failed"]))
-
-        st.markdown("**Or download a results email pack (.eml folder) — for your desktop mail app**")
-        st.caption("Ready-to-send .eml files, one per student, each with their feedback PDF "
-                   "attached — open in Outlook / Apple Mail / Thunderbird and press Send. "
-                   "No mail server needed. (This is the way to send results through your "
-                   "computer's mail app — a mailto link can't carry the PDF attachment.)")
-        if st.button("Build results email pack (zip)", key="res_pack"):
-            rep = survey.load_survey(Vault(), survey.slugify(course, eval_no)).get("report") or {}
-            items = emailpack.results_items(S["teams"], S.get("roster"), subject_t, body_t,
-                                            attach_team, course, eval_no, report=rep)
-            S["results_pack"] = emailpack.zip_folders({"Results": items})
-        if S.get("results_pack"):
-            st.download_button("⬇ Download results emails (zip)", S["results_pack"],
-                               f"{survey.slugify(course, eval_no)}_results_emails.zip",
-                               "application/zip")
-
-        st.markdown("**Or an auto-send pack — sends the whole batch through Outlook / Apple Mail**")
-        st.caption("Contains the PDFs plus a Windows and a Mac script with every email baked "
-                   "in. Unzip, run the one for your OS, approve the permission prompt, and it "
-                   "sends everything automatically from your account.")
-        if st.button("Build results auto-send pack (zip)", key="res_auto"):
-            rep = survey.load_survey(Vault(), survey.slugify(course, eval_no)).get("report") or {}
-            parts = emailpack.results_parts(S["teams"], S.get("roster"), subject_t, body_t,
-                                            attach_team, course, eval_no, report=rep)
-            S["results_autopack"] = emailpack.send_all_pack(parts, "Results")
-        if S.get("results_autopack"):
-            st.download_button("⬇ Download results auto-send pack (zip)", S["results_autopack"],
-                               f"{survey.slugify(course, eval_no)}_results_autosend.zip",
-                               "application/zip")
+        report = survey.load_survey(Vault(), survey.slugify(course, eval_no)).get("report") or {}
+        _results_delivery("res", S["teams"], S.get("roster"), subject_t, body_t,
+                          attach_team, course, eval_no, report)
 
 # =========================================================================== #
 # TAB 6 — Compare rounds (eval 1 vs 2 vs 3 for the same students)
