@@ -587,6 +587,13 @@ with tabs[0]:
         with st.expander("Or open each in your computer's mail app (mailto)"):
             _mail_app_links(links, subj, body, course, eval_no)
 
+        if st.button("Build invitation auto-send pack (Mac + Windows scripts)", key="inv_auto"):
+            parts = emailpack.invite_parts(links, subj, body, course, eval_no)
+            S["invite_autopack"] = emailpack.send_all_pack(parts, "Invitations")
+        if S.get("invite_autopack"):
+            st.download_button("⬇ Download invitation auto-send pack (zip)", S["invite_autopack"],
+                               f"{slug}_invitations_autosend.zip", "application/zip")
+
 # =========================================================================== #
 # TAB 2 — Responses (monitor + load into grading)
 # =========================================================================== #
@@ -692,6 +699,13 @@ with tabs[1]:
                                         "link": f"{base_url}{_sep}t={_tok}" if base_url
                                                 else f"?t={_tok}"})
                     _mail_app_links(_recips, subj, body, course, eval_no)
+                    if st.button("Build reminder auto-send pack (Mac + Windows)", key="rem_auto"):
+                        parts = emailpack.invite_parts(_recips, subj, body, course, eval_no)
+                        S["reminder_autopack"] = emailpack.send_all_pack(parts, "Reminders")
+                    if S.get("reminder_autopack"):
+                        st.download_button("⬇ Download reminder auto-send pack (zip)",
+                                           S["reminder_autopack"],
+                                           f"{slug}_reminders_autosend.zip", "application/zip")
 
         st.divider()
         st.markdown("##### Grade the collected responses")
@@ -959,6 +973,20 @@ with tabs[4]:
         if S.get("results_pack"):
             st.download_button("⬇ Download results emails (zip)", S["results_pack"],
                                f"{survey.slugify(course, eval_no)}_results_emails.zip",
+                               "application/zip")
+
+        st.markdown("**Or an auto-send pack — sends the whole batch through Outlook / Apple Mail**")
+        st.caption("Contains the PDFs plus a Windows and a Mac script with every email baked "
+                   "in. Unzip, run the one for your OS, approve the permission prompt, and it "
+                   "sends everything automatically from your account.")
+        if st.button("Build results auto-send pack (zip)", key="res_auto"):
+            rep = survey.load_survey(Vault(), survey.slugify(course, eval_no)).get("report") or {}
+            parts = emailpack.results_parts(S["teams"], S.get("roster"), subject_t, body_t,
+                                            attach_team, course, eval_no, report=rep)
+            S["results_autopack"] = emailpack.send_all_pack(parts, "Results")
+        if S.get("results_autopack"):
+            st.download_button("⬇ Download results auto-send pack (zip)", S["results_autopack"],
+                               f"{survey.slugify(course, eval_no)}_results_autosend.zip",
                                "application/zip")
 
 # =========================================================================== #
