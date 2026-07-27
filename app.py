@@ -228,7 +228,7 @@ def _deliver(messages, method, drafts_only, ok_label="Done"):
 tabs = st.tabs([
     "1 · Survey setup", "2 · Responses",
     "3 · Upload & map", "4 · Configure", "5 · Review & PDFs",
-    "6 · Email", "7 · Vault",
+    "6 · Email", "7 · Compare rounds", "8 · Vault",
 ])
 
 # =========================================================================== #
@@ -317,6 +317,26 @@ with tabs[0]:
         if cur["ask_confidential"]:
             cur["confidential_prompt"] = st.text_input("Confidential-note prompt",
                                                        cur["confidential_prompt"])
+
+    cur.setdefault("report", dict(survey.REPORT_DEFAULTS))
+    with st.expander("What students see in their feedback report"):
+        st.caption("Choose which sections appear on each student's feedback PDF. "
+                   "Grading is unaffected — this only changes what's shown to students.")
+        rp = dict(cur["report"])
+        rp["performance"] = st.checkbox("Performance label (High / Adequate / Low)",
+                                        value=rp.get("performance", True))
+        rp["grade_adjustment"] = st.checkbox("Grade-adjustment meter (± vs team score)",
+                                             value=rp.get("grade_adjustment", True))
+        rp["dimensions"] = st.checkbox("Rating meters + dimension letter grades",
+                                       value=rp.get("dimensions", True))
+        rp["pay_grade"] = st.checkbox("Pay grade", value=rp.get("pay_grade", True))
+        rp["valued"] = st.checkbox("“What your teammates valued” (contributions)",
+                                   value=rp.get("valued", True))
+        rp["focus"] = st.checkbox("“Where to focus next” (improvements)",
+                                  value=rp.get("focus", True))
+        rp["response_quality"] = st.checkbox("“The feedback you gave” (your Q + points)",
+                                             value=rp.get("response_quality", True))
+        cur["report"] = rp
 
     cur["is_open"] = st.toggle("Accept submissions (master switch)", value=cur["is_open"],
                                help="Turn off to close the survey immediately, regardless "
@@ -619,21 +639,27 @@ with tabs[4]:
             st.download_button("⬇ Results CSV", frame.to_csv(index=False),
                                "peerparley_results.csv", "text/csv")
 
+            report = survey.load_survey(Vault(), survey.slugify(course, eval_no)).get("report") or {}
+
             st.markdown("##### Instructor reports")
             st.caption("The section summary lists every student's dimension grades, pay "
-                       "grade, grade adjustment, and the points they earned for the quality "
-                       "of the feedback they wrote.")
+                       "grade, grade adjustment, the points they earned for the quality of "
+                       "the feedback they wrote, and the confidential comments.")
+            _summary_pdf = pdfgen.build_section_summary_pdf(teams, course, eval_no)
+            _conf_pdf = pdfgen.build_confidential_pdf(teams, course, eval_no)
             r1, r2 = st.columns(2)
             r1.download_button(
-                "⬇ Instructor summary (PDF)",
-                pdfgen.build_section_summary_pdf(teams, course, eval_no),
+                "⬇ Instructor summary (PDF)", _summary_pdf,
                 f"peerparley_{course or 'section'}_eval{eval_no}_summary.pdf",
                 "application/pdf", type="primary")
             r2.download_button(
-                "⬇ Confidential feedback (PDF)",
-                pdfgen.build_confidential_pdf(teams, course, eval_no),
+                "⬇ Confidential feedback (PDF)", _conf_pdf,
                 f"peerparley_{course or 'section'}_eval{eval_no}_confidential.pdf",
                 "application/pdf")
+            with st.expander("Preview instructor summary"):
+                _render_pdf(_summary_pdf)
+            with st.expander("Preview confidential feedback"):
+                _render_pdf(_conf_pdf)
 
             st.markdown("##### Student & team PDFs")
             colA, colB = st.columns(2)
@@ -651,7 +677,7 @@ with tabs[4]:
                             safe = m.name.replace(" ", "_").replace("/", "-")
                             z.writestr(
                                 f"team_{t.team}/{safe}_feedback.pdf",
-                                pdfgen.build_individual_pdf(m, eval_no, course))
+                                pdfgen.build_individual_pdf(m, eval_no, course, report=report))
                 S["pdf_zip"] = zbuf.getvalue()
                 st.success("PDFs built.")
             if S.get("pdf_zip"):
@@ -666,7 +692,7 @@ with tabs[4]:
                     ti, ni = pick.split(" · ", 1)
                     m = next(m for t in teams for m in t.members
                              if t.team == ti and m.name == ni)
-                    pdf = pdfgen.build_individual_pdf(m, eval_no, course)
+                    pdf = pdfgen.build_individual_pdf(m, eval_no, course, report=report)
                     _render_pdf(pdf)
 
 # =========================================================================== #
@@ -720,8 +746,9 @@ with tabs[5]:
 
         if go:
             roster = S.get("roster")
+            report = survey.load_survey(Vault(), survey.slugify(course, eval_no)).get("report") or {}
             messages = _build_messages(S["teams"], roster, subject_t, body_t,
-                                       attach_team, course, eval_no)
+                                       attach_team, course, eval_no, report=report)
             st.write(f"Prepared {len(messages)} messages.")
             mailer = _mailer_for(method)
             if mailer is None:
@@ -744,9 +771,78 @@ with tabs[5]:
                 st.dataframe(pd.DataFrame(result["failed"]))
 
 # =========================================================================== #
-# TAB 7 — Vault (encrypted save / load behind the firewall)
+# TAB 7 — Compare rounds (eval 1 vs 2 vs 3 for the same students)
 # =========================================================================== #
 with tabs[6]:
+    st.subheader("Compare evaluations")
+    st.caption("See how the same students' peer-evaluation results change across "
+               "evaluation rounds for this course.")
+    if not course:
+        st.info("Pick or enter a course in the sidebar first.")
+    else:
+        vault = Vault()
+        _mine = [s for s in survey.visible_surveys(survey.list_surveys(vault), user)
+                 if s["course"] == course]
+        eval_nos = sorted({str(s["eval_no"]) for s in _mine}, key=lambda x: (len(x), x))
+        if not eval_nos:
+            st.info("No saved evaluations for this course yet.")
+        else:
+            picks = st.multiselect("Evaluations to compare", eval_nos, default=eval_nos)
+            settings = S.get("settings", GradeSettings())
+            evals_data = []
+            for en in picks:
+                ld = survey.responses_to_long(vault, survey.slugify(course, en))
+                if ld.empty:
+                    continue
+                se = survey.self_evaluations(vault, survey.slugify(course, en))
+                evals_data.append((en, compute(ld, settings, self_evals=se)))
+            if not evals_data:
+                st.warning("None of the selected evaluations have responses yet.")
+            else:
+                by_eval, team_of, names = {}, {}, set()
+                for en, tr in evals_data:
+                    by_eval[en] = {m.name: m for t in tr for m in t.members}
+                    for t in tr:
+                        for m in t.members:
+                            names.add(m.name); team_of[m.name] = t.team
+                rows = []
+                for nm in sorted(names, key=lambda n: (str(team_of.get(n, "")), n.lower())):
+                    row = {"Team": team_of.get(nm, ""), "Student": nm}
+                    for en, _ in evals_data:
+                        m = by_eval[en].get(nm)
+                        row[f"E{en} Score"] = m.individual_score if m else None
+                        row[f"E{en} Δ%"] = m.signed_pct if m else None
+                        row[f"E{en} Perf"] = m.performance if m else ""
+                    rows.append(row)
+                cmp_df = pd.DataFrame(rows)
+                st.dataframe(cmp_df, use_container_width=True, height=360)
+                st.download_button("⬇ comparison.csv", cmp_df.to_csv(index=False),
+                                   f"peerparley_{course}_comparison.csv", "text/csv")
+
+                teams_list = sorted({team_of[n] for n in names})
+                if teams_list:
+                    tsel = st.selectbox("Chart a team's individual score across rounds",
+                                        teams_list)
+                    chart = []
+                    for en, _ in evals_data:
+                        d = {"Eval": f"Eval {en}"}
+                        for nm in names:
+                            if team_of.get(nm) == tsel:
+                                m = by_eval[en].get(nm)
+                                d[nm] = m.individual_score if m else None
+                        chart.append(d)
+                    st.line_chart(pd.DataFrame(chart).set_index("Eval"))
+
+                st.download_button(
+                    "⬇ Comparison report (PDF)",
+                    pdfgen.build_comparison_pdf(course, evals_data),
+                    f"peerparley_{course}_comparison.pdf", "application/pdf", type="primary")
+
+
+# =========================================================================== #
+# TAB 8 — Vault (encrypted save / load behind the firewall)
+# =========================================================================== #
+with tabs[7]:
     st.subheader("Encrypted vault — behind the firewall")
     st.caption("Bundles are AES-encrypted locally, then written to "
                f"**{cfg.vault.backend}**. The cloud host never stores plaintext PII.")

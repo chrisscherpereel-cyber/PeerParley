@@ -15,6 +15,9 @@ uses. The Qualtrics upload path is still there as a fallback.
 | `peerparley/accounts.py` | **new** — multi-instructor accounts (PBKDF2 hashes in the vault), roles, and a shared-password break-glass admin. |
 | `peerparley/auth.py` | **modified** — per-user username/password login (replaces the single shared-password gate; the old password still works as admin). |
 | `peerparley/config.py` | **modified** — added optional `token_secret` and `public_url`. |
+| `peerparley/grading.py` | **modified** — rating-matrix dimension grades, forced-ranking performance, pay grade, and self-evaluation (full `PeerParley_V2_3` parity); unchanged for allocation-only data. |
+| `peerparley/pdfgen.py` | **modified** — V2_3-style student PDF (respects report toggles), landscape instructor summary with confidential comments, and a cross-round comparison PDF. |
+| `peerparley/ui_helpers.py` | **modified** — `build_messages` passes the instructor's report display settings into each student PDF. |
 | `app.py` | **modified** — student-link interceptor, two new tabs, user-aware sidebar with a survey picker + admin user panel, ownership enforcement, delivery-method pickers, and CSV downloads. |
 
 Nothing in `grading.py`, `pdfgen.py`, `email_delivery.py`, `vault.py`, or
@@ -42,12 +45,45 @@ edits every prompt and the four statements in → *Wording*. Nothing is
 pre-selected on the rating/ranking questions, so an unanswered item is caught
 rather than silently recorded as neutral.
 
-> **Grading note.** The grade still comes from the **$100 allocation** (peer
-> ratio) and the **written comments** (comment-support score Q), exactly as the
-> engine works today — the collected ratings and forced ranking are **stored
-> encrypted** with each response for the record and export, but the current
-> `grading.py` doesn't fold them into the score. Wiring ratings/ranking into the
-> grade and the PDFs is a clean follow-up if you want it.
+**Fast, self-checking form.** Ratings and the forced ranking use **radio buttons**
+(not dropdowns), and the form validates **as the student answers** — a live
+running total on the $100 allocation, inline "rank everyone / use every category"
+checks, and a count of unanswered ratings. The **Submit** button stays disabled,
+with a clear checklist of what's left, until everything required is complete, so
+students can't submit an incomplete or mis-totalled evaluation.
+
+**Full workbook parity.** The engine reproduces the original `PeerParley_V2_3`
+calculations:
+
+- **Grade adjustment** — `Team Score × [1 + B·A·Q·(peer ratio − 1)]`, agreement
+  weight `A` banded at 10/20/30%.
+- **Response-quality Points** — each student earns points for the **quality of the
+  feedback they wrote** (author-side comment-support score `Q × max_points`),
+  matching the workbook's feedback points.
+- **Dimension letter grades** — Team Player / Quantity / Quality / Effect, each
+  `mean(rating)/7 → letter` from the 4-statement matrix.
+- **Performance** — from the **forced ranking** (High / Adequate / Low) when
+  collected, otherwise the allocation ratio.
+- **Pay grade** — average received allocation ÷ team average.
+- **Self-evaluation** — the student's own ratings shown beside the peer grades.
+
+**The reports:**
+
+- **Instructor summary PDF** (landscape) — every student's dimension grades, pay
+  grade, agreement `A`, support `Q`, **response-quality points**, multiplier,
+  grade Δ, and performance, with a legend. Download it directly from Review &
+  PDFs, or in the full zip.
+- **Student feedback PDF** — styled like the original project: rating meters
+  (teammates' average with your self-rating tick and peer/self letter badges),
+  performance + pay grade + grade-adjustment meter, "What your teammates valued"
+  and "Where to focus next", and "The feedback you gave" (your Q + points).
+
+With only allocation + comments (a plain Qualtrics export), the engine degrades
+gracefully — the dimension/ranking fields are simply blank.
+
+**Default public URL.** `public_url` now defaults to
+`https://peerparley.streamlit.app`, so student links prefill correctly without
+any secret; set the `public_url` secret to override.
 
 ## Multiple instructors, per-section visibility
 
