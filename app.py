@@ -480,6 +480,19 @@ with tabs[0]:
                 _deliver(msgs, inv_method, drafts_only and inv_method == "graph",
                          ok_label="Links delivered")
 
+        st.markdown("**Or download an invitation email pack (.eml folder)**")
+        st.caption("Ready-to-send .eml files (one per student) to open in Outlook / "
+                   "Apple Mail — no mail server needed.")
+        if st.button("Build invitation email pack (zip)", key="inv_pack"):
+            if not base_url.strip():
+                st.error("Enter the public app URL first, or the links won't point anywhere.")
+            else:
+                items = emailpack.invite_items(links, subj, body, course, eval_no)
+                S["invite_pack"] = emailpack.zip_folders({"Invitations": items})
+        if S.get("invite_pack"):
+            st.download_button("⬇ Download invitation emails (zip)", S["invite_pack"],
+                               f"{slug}_invitations.zip", "application/zip")
+
 # =========================================================================== #
 # TAB 2 — Responses (monitor + load into grading)
 # =========================================================================== #
@@ -548,6 +561,25 @@ with tabs[1]:
                             body=mail.render_template(body, ctx), attachments=[]))
                     _deliver(msgs, rem_method, drafts_only and rem_method == "graph",
                              ok_label="Reminders delivered")
+
+                st.markdown("**Or download a reminder email pack (.eml folder)**")
+                if st.button("Build reminder email pack (zip)", key="rem_pack"):
+                    from peerparley.tokens import make_token
+                    secret = survey.token_secret(cfg)
+                    recips = []
+                    for r in nonresp:
+                        if not r["email"]:
+                            continue
+                        tok = make_token({"s": slug, "t": r["team"], "p": r["pos"]}, secret)
+                        sep = "&" if "?" in base_url else "?"
+                        link = f"{base_url}{sep}t={tok}" if base_url else f"?t={tok}"
+                        recips.append({"name": r["name"], "email": r["email"],
+                                       "team": r["team"], "link": link})
+                    items = emailpack.invite_items(recips, subj, body, course, eval_no)
+                    S["reminder_pack"] = emailpack.zip_folders({"Reminders": items})
+                if S.get("reminder_pack"):
+                    st.download_button("⬇ Download reminder emails (zip)", S["reminder_pack"],
+                                       f"{slug}_reminders.zip", "application/zip")
 
         st.divider()
         st.markdown("##### Grade the collected responses")
