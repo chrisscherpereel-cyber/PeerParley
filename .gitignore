@@ -3,11 +3,11 @@
 .streamlit/secrets.toml
 
 # ── Encrypted student data (the "behind the firewall" cache) ──────────────
-# Local vault backend writes here: survey config, roster snapshots, and every
-# student response. Even though it's encrypted, it's student-record data.
+# Local vault backend writes here: accounts, survey config, roster snapshots,
+# and every student response. Even though it's encrypted, it's student-record data.
 vault_cache/
 *.ppx        # encrypted dataset bundles
-*.ppj        # survey / roster / response blobs
+*.ppj        # accounts / survey / roster / response blobs
 
 # ── Raw student data & generated deliverables ─────────────────────────────
 *.csv
@@ -15,6 +15,7 @@ vault_cache/
 *.xls
 *.pdf
 *.zip
+*.eml        # generated email files / email packs
 
 # ── Python / environment ──────────────────────────────────────────────────
 __pycache__/
@@ -26,7 +27,7 @@ venv/
 # ── OS cruft ──────────────────────────────────────────────────────────────
 .DS_Store
 
-# ── Keep these (explicitly not ignored) ───────────────────────────────────
+# ── Keep these (explicitly NOT ignored) ───────────────────────────────────
 !.streamlit/config.toml
 !.streamlit/secrets.toml.example
 !requirements.txt
