@@ -135,8 +135,10 @@ def _ps_sq(s: str) -> str:
     return "'" + (s or "").replace("'", "''") + "'"
 
 
-def _as_dq(s: str) -> str:
-    return '"' + (s or "").replace("\\", "\\\\").replace('"', '\\"') + '"'
+def _as_str(s: str) -> str:
+    """An AppleScript double-quoted string literal (handles quotes and newlines)."""
+    return '"' + ((s or "").replace("\\", "\\\\").replace('"', '\\"')
+                  .replace("\r", "").replace("\n", "\\n")) + '"'
 
 
 def _powershell(parts: List[dict]) -> str:
@@ -168,41 +170,50 @@ def _powershell(parts: List[dict]) -> str:
 
 
 def _applescript(parts: List[dict]) -> str:
-    rows = []
+    has_att = any(p["attachments"] for p in parts)
+    lines = [
+        '-- PeerParley — send every email via Apple Mail on a Mac.',
+        '-- Open this file in Script Editor (double-click) and click Run (the ▶ button).',
+        '-- Approve the one-time prompt that lets it control Mail. Messages are sent',
+        '-- from your own Mail account.',
+        '',
+    ]
+    if has_att:
+        lines.append('set folderPath to (POSIX path of (choose folder with prompt '
+                     '"Select the unzipped folder that holds this script and the PDF files"))')
+    else:
+        lines.append('set folderPath to ""')
+    lines.append('set msgs to {}')
     for p in parts:
-        atts = "{" + ", ".join(_as_dq(a[0]) for a in p["attachments"]) + "}"
-        rows.append("{|to|:%s, |subj|:%s, |body64|:%s, |atts|:%s}" % (
-            _as_dq(p["to"]), _as_dq(p["subject"]), _as_dq(_b64(p["body"])), atts))
-    return (
-        '-- PeerParley — send everything via Apple Mail on a Mac.\n'
-        '-- 1) Unzip this folder.  2) Open this file in Script Editor and click Run\n'
-        '--    (or: right-click -> Open With -> Script Editor). Approve the prompt\n'
-        '--    that lets it control Mail. It sends from your Mail account.\n'
-        'set myPath to POSIX path of (path to me)\n'
-        'set AppleScript\'s text item delimiters to "/"\n'
-        'set folderPath to ((text items 1 thru -2 of myPath) as text) & "/"\n'
-        'set msgs to {\n' + ",\n".join(rows) + '\n}\n'
-        'set sentCount to 0\n'
-        'tell application "Mail"\n'
-        '  repeat with m in msgs\n'
-        '    set theTo to (|to| of m)\n'
-        '    if theTo is not "" then\n'
-        '      set theBody to (do shell script "echo " & quoted form of (|body64| of m) & " | base64 --decode")\n'
-        '      set newMsg to make new outgoing message with properties {subject:(|subj| of m), content:theBody, visible:false}\n'
-        '      tell newMsg\n'
-        '        make new to recipient at end of to recipients with properties {address:theTo}\n'
-        '        repeat with a in (|atts| of m)\n'
-        '          try\n'
-        '            make new attachment with properties {file name:(POSIX file (folderPath & (a as text)))} at after the last paragraph\n'
-        '          end try\n'
-        '        end repeat\n'
-        '      end tell\n'
-        '      send newMsg\n'
-        '      set sentCount to sentCount + 1\n'
-        '    end if\n'
-        '  end repeat\n'
-        'end tell\n'
-        'display dialog "Sent " & sentCount & " message(s) via Apple Mail." buttons {"OK"} default button "OK"\n')
+        atts = "{" + ", ".join(_as_str(a[0]) for a in p["attachments"]) + "}"
+        lines.append("set end of msgs to {|to|:%s, |subj|:%s, |body|:%s, |atts|:%s}" % (
+            _as_str(p["to"]), _as_str(p["subject"]), _as_str(_strip_html(p["body"])), atts))
+    lines += [
+        'set sentCount to 0',
+        'tell application "Mail"',
+        '  repeat with m in msgs',
+        '    if (|to| of m) is not "" then',
+        '      set newMsg to make new outgoing message with properties '
+        '{subject:(|subj| of m), content:(|body| of m), visible:false}',
+        '      tell newMsg',
+        '        make new to recipient at end of to recipients with properties '
+        '{address:(|to| of m)}',
+        '        repeat with a in (|atts| of m)',
+        '          try',
+        '            make new attachment with properties '
+        '{file name:(POSIX file (folderPath & (a as text)))} at after the last paragraph',
+        '          end try',
+        '        end repeat',
+        '      end tell',
+        '      send newMsg',
+        '      set sentCount to sentCount + 1',
+        '    end if',
+        '  end repeat',
+        'end tell',
+        'display dialog "Sent " & sentCount & " message(s) via Apple Mail." '
+        'buttons {"OK"} default button "OK"',
+    ]
+    return "\n".join(lines) + "\n"
 
 
 _README = (
