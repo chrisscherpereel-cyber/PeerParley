@@ -179,6 +179,52 @@ DEFAULT_INVITE_BODY = (
 )
 
 
+GRADING_EXPLAINER = """
+Every number a student sees is produced by one of these steps. Defaults are set so
+you can grade without changing anything.
+
+**1. Team score** — the grade the whole team starts with (default **100**). Peer
+input then nudges each member up or down from this.
+
+**2. Pay grade — the core signal.** Each student splits **$100** across teammates.
+A student's *pay grade* is the average dollars they **received** ÷ the **team
+average**. So **100% = exactly the team average**. Above 100% means teammates
+valued them more than average; below 100% means less. Because it's measured
+against the team's own average, self-allocations or blank answers can never push a
+whole team into the negative.
+
+**3. Grade adjustment (the ± %).** This is what moves the grade:
+
+> adjustment ≈ **sensitivity** × (pay grade − 100%)
+
+So a student **above** the team average gets a **bonus (+%)**, one **below** gets a
+**deduction (−%)**, and one exactly average gets **0%**. It's capped at the maximum
+you set (default **±15%**). Two optional weights can only *shrink* the adjustment,
+never flip its sign:
+
+- **Agreement (A)** — if evaluators strongly *disagree* about a student, their
+  adjustment is softened (they got mixed signals).
+- **Comment support (Q)** — if the written comments about a student don't back up
+  the dollars, the adjustment is softened. With no comments, Q is neutral (no
+  effect).
+
+**4. Feedback points** — each student also earns points (default up to **5**) for
+the **quality of the feedback *they* wrote** about teammates — length, specifics,
+and whether it looks copy-pasted. This rewards taking the evaluation seriously.
+
+**5. Dimension letter grades** — the four rating statements (team player, quantity,
+quality, effect) each average to a 0–100% score → a letter grade, shown to the
+student so they know *where* they're strong or weak.
+
+**6. Performance (High / Adequate / Low)** — from the **forced ranking** when the
+survey collected it; otherwise from the pay grade (above/below the team average by
+a set band).
+
+**7. Self-evaluation** — the student's own ratings appear next to their peers' on
+their feedback sheet, so they can see the gap.
+"""
+
+
 def _email_body(default_html, key, height=220):
     """WYSIWYG email-body editor (Quill) that returns HTML. Falls back to a plain
     HTML text box if the streamlit-quill component isn't available."""
@@ -242,9 +288,13 @@ def _deliver(messages, method, drafts_only, ok_label="Done"):
         st.dataframe(pd.DataFrame(result["failed"]))
 
 
+st.info("**Follow the tabs left → right:** ① Set up the survey → ② Collect responses "
+        "→ ③ Grading rules → ④ Results & reports → ⑤ Send feedback. "
+        "*Compare* and *Vault* are optional.")
+
 tabs = st.tabs([
-    "1 · Survey setup", "2 · Responses", "3 · Configure",
-    "4 · Review & PDFs", "5 · Email", "6 · Compare rounds", "7 · Vault",
+    "① Set up survey", "② Collect responses", "③ Grading rules",
+    "④ Results & reports", "⑤ Send feedback", "📈 Compare", "🔒 Vault",
 ])
 
 # =========================================================================== #
@@ -252,9 +302,10 @@ tabs = st.tabs([
 # =========================================================================== #
 with tabs[0]:
     st.subheader("Set up & send the survey")
-    st.caption("Upload the **contact list** (names, emails, teams) — the only input "
-               "needed. PeerParley builds a personal evaluation link for every "
-               "student; their answers become the grading input directly.")
+    st.caption("Step 1 of 5. Upload the **contact list** (names, emails, teams) — the only "
+               "input needed. PeerParley builds a personal evaluation link for every "
+               "student; their answers become the grading input directly. When you've "
+               "sent the links, move to **② Collect responses**.")
     slug = survey.slugify(course, eval_no)
     st.caption(f"Course **{course or '—'}**, Eval **{eval_no}** → survey id `{slug}`")
 
@@ -301,8 +352,8 @@ with tabs[0]:
                 m1.metric("Evaluation rows", q_rep["rows"])
                 m2.metric("Respondents", q_rep["evaluators"])
                 m3.metric("Teams", q_rep["teams"])
-                st.success("Parsed the export. Open **4 · Review & PDFs** to see the "
-                           "grades, then **5 · Email** to send feedback.")
+                st.success("Parsed the export. Open **④ Results & reports** to see the "
+                           "grades, then **⑤ Send feedback**.")
                 with st.expander("Preview parsed rows"):
                     st.dataframe(q_long.head(30), use_container_width=True)
             elif q_long is not None:
@@ -497,7 +548,10 @@ with tabs[0]:
 # TAB 2 — Responses (monitor + load into grading)
 # =========================================================================== #
 with tabs[1]:
-    st.subheader("Responses")
+    st.subheader("Collect responses")
+    st.caption("Step 2 of 5. Watch who has responded, send reminders to those who "
+               "haven't, and when you're ready click **Load responses into grading** at "
+               "the bottom — then go to **④ Results & reports**.")
     slug = survey.slugify(course, eval_no)
     vault = Vault()
     _owner = survey.survey_owner(vault, slug)
@@ -595,61 +649,76 @@ with tabs[1]:
                 snap = survey.load_roster_snapshot(vault, slug)
                 S["roster"] = survey.roster_for_matching(snap)
                 st.success(f"Loaded {len(long_df)} evaluation rows from {got} submission(s). "
-                           "Open **5 · Review & PDFs** to grade, then **6 · Email**.")
+                           "Open **④ Results & reports** to grade, then **⑤ Send feedback**.")
 
 # =========================================================================== #
 # TAB 3 — Configure grading
 # =========================================================================== #
 with tabs[2]:
     st.subheader("Grading settings")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        team_default = st.number_input("Default team score", 0.0, 200.0, 100.0)
-        B = st.slider("Sensitivity B", 0.0, 1.5, 0.5, 0.05,
-                      help="How much peer input moves the individual grade.")
-        maxpts = st.number_input("Max comment points", 1, 20, 5)
-    with c2:
-        lo = st.slider("Min multiplier", 0.5, 1.0, 0.85, 0.01)
-        hi = st.slider("Max multiplier", 1.0, 1.5, 1.15, 0.01)
-        guard = st.checkbox("Agreement guard", value=True,
-                            help="Soften forced 'Low' when evaluators disagree.")
-    with c3:
-        method = st.selectbox(
-            "Performance method",
-            ["allocation_ratio", "composite", "rank_linear", "rank_one_mean"],
-            format_func=lambda x: {
-                "allocation_ratio": "Allocation ratio (avg received ÷ team avg)",
-                "composite": "Composite",
-                "rank_linear": "Rank — linear tiers",
-                "rank_one_mean": "Rank — #1 vs mean",
-            }[x])
-        band = st.slider("Performance band ±", 0.0, 0.25, 0.08, 0.01)
-        rstep = st.selectbox("Rounding step", [1, 5], index=0)
-        rmode = st.selectbox("Rounding mode", ["nearest", "up", "down"])
+    st.caption("Step 3 of 5. The defaults are sensible — you can skip straight to "
+               "**Results** without changing anything. The panel below explains exactly "
+               "how each grade is produced.")
 
-    descriptions = {
-        "allocation_ratio": "Compares each student's average received allocation "
-                            "to the team average; ±band sets High/Low cutoffs.",
-        "composite": "Blends allocation ratio with comment support Q.",
-        "rank_linear": "Top third = High, bottom third = Low, rest Expected.",
-        "rank_one_mean": "Only the single top contributor is flagged High.",
-    }
-    st.info(descriptions[method])
+    with st.expander("📖 How grading works (plain English)", expanded=True):
+        st.markdown(GRADING_EXPLAINER)
+
+    st.markdown("##### The two settings most people touch")
+    c1, c2 = st.columns(2)
+    with c1:
+        B = st.slider("How strongly peer input adjusts grades (sensitivity)",
+                      0.0, 1.5, 0.5, 0.05,
+                      help="0 = peers don't move the grade at all; 1 = full effect.")
+    with c2:
+        max_adj = st.slider("Maximum adjustment (± %)", 0, 30, 15, 1,
+                            help="Caps how far above or below the team score any grade "
+                                 "can move. ±15% means the top student can earn at most "
+                                 "+15% and the lowest at most −15%.")
+
+    with st.expander("Advanced options (most instructors leave these alone)"):
+        team_default = st.number_input("Default team score (before peer adjustment)",
+                                       0.0, 200.0, 100.0)
+        maxpts = st.number_input("Max points for feedback quality", 1, 20, 5,
+                                 help="Points a student can earn for the quality of the "
+                                      "feedback they wrote about teammates.")
+        guard = st.checkbox("Agreement guard — soften a forced 'Low' when evaluators "
+                            "strongly disagree", value=True)
+        method = st.selectbox(
+            "Performance label when there's NO forced ranking",
+            ["allocation_ratio", "rank_linear", "rank_one_mean"],
+            format_func=lambda x: {
+                "allocation_ratio": "Above / below the team average (± band)",
+                "rank_linear": "Top third High · bottom third Low",
+                "rank_one_mean": "Only the single top contributor is High",
+            }[x],
+            help="Forced ranking is used automatically when the survey collected it; "
+                 "this only applies otherwise.")
+        band = st.slider("Performance band ± (for the average-based label)",
+                         0.0, 0.25, 0.08, 0.01)
+        rstep = st.selectbox("Round adjustments to", [1, 5], index=0,
+                             format_func=lambda x: f"{x}%")
+        rmode = st.selectbox("Rounding direction", ["nearest", "up", "down"])
 
     S["settings"] = GradeSettings(
         team_score_default=team_default, sensitivity_B=B,
-        min_multiplier=lo, max_multiplier=hi, max_comment_points=int(maxpts),
-        rounding_step=int(rstep), rounding_mode=rmode,
+        min_multiplier=1 - max_adj / 100.0, max_multiplier=1 + max_adj / 100.0,
+        max_comment_points=int(maxpts), rounding_step=int(rstep), rounding_mode=rmode,
         performance_method=method, performance_band=band, agreement_guard=guard,
     )
+    st.success(f"Grades will move at most **±{max_adj}%** from the team score, based on "
+               "each student's pay grade (share of the team average).")
 
 # =========================================================================== #
 # TAB 4 — Review + PDFs
 # =========================================================================== #
 with tabs[3]:
-    st.subheader("Results & deliverables")
+    st.subheader("Results & reports")
+    st.caption("Step 4 of 5. Review the grades, download the instructor summary and the "
+               "student feedback PDFs, then move to **⑤ Send feedback**.")
     if "long_df" not in S:
-        st.info("Load responses in step 2 (or upload in step 3) first.")
+        st.info("No responses loaded yet. Go to **② Collect responses** and click "
+                "*Load responses into grading* — or upload a Qualtrics export on the "
+                "**① Set up survey** tab.")
     else:
         settings = S.get("settings", GradeSettings())
         teams = compute(S["long_df"], settings, self_evals=S.get("self_evals"))
@@ -722,9 +791,12 @@ with tabs[3]:
 # TAB 5 — Email
 # =========================================================================== #
 with tabs[4]:
-    st.subheader("Email delivery")
+    st.subheader("Send feedback")
+    st.caption("Step 5 of 5. Email each student their feedback PDF, or download a ready-to-"
+               "send email pack. Prefer to send yourself? Use the CSV or the email pack.")
     if "teams" not in S:
-        st.info("Compute results in step 5 first.")
+        st.info("No results yet — open **④ Results & reports** first so the grades are "
+                "computed.")
     else:
         default_subject = "Your peer evaluation feedback — Eval {eval_no}"
         default_body = (
@@ -760,7 +832,7 @@ with tabs[4]:
                            pd.DataFrame(_rows).to_csv(index=False),
                            f"peerparley_results_recipients_eval{eval_no}.csv", "text/csv")
         st.caption("Prefer not to email from the app? Download **recipients.csv** here and "
-                   "the **PDF bundle** on the Review & PDFs tab, and send them yourself.")
+                   "the **PDF bundle** on the Results tab, and send them yourself.")
 
         # ---- complete email pack (.eml folders) ------------------------------
         st.markdown("##### Complete email pack (.eml folder)")
@@ -932,7 +1004,8 @@ with tabs[6]:
             try:
                 df = decrypt_dataframe(vault.get_bytes(pick))
                 S["long_df"] = df
-                st.success(f"Loaded `{pick}` ({len(df)} rows). Go to step 5 to recompute.")
+                st.success(f"Loaded `{pick}` ({len(df)} rows). Open **④ Results & reports** "
+                           "to recompute.")
             except Exception as exc:
                 st.error(f"Load failed: {exc}")
 
