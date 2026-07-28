@@ -457,6 +457,29 @@ with tabs[0]:
     slug = survey.slugify(course, eval_no)
     st.caption(f"Course **{course or '—'}**, Eval **{eval_no}** → survey id `{slug}`")
 
+    # ---- Downloadable starter template --------------------------------------
+    _tpl_path = os.path.join(_ASSET_DIR, "ContactList_Template.xlsx")
+    if os.path.exists(_tpl_path):
+        with open(_tpl_path, "rb") as _f:
+            _tpl_bytes = _f.read()
+        c_tpl, c_note = st.columns([1, 2])
+        with c_tpl:
+            st.download_button(
+                "⬇️ Download contact list template",
+                _tpl_bytes,
+                file_name="ContactList_Template.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_contact_template",
+            )
+        with c_note:
+            st.caption("🟡 **Fill in the yellow cells only** — first name, last name, "
+                       "email, class, section, and team. The green header and the grey "
+                       "columns fill in automatically; don't edit them. Then upload the "
+                       "saved file below.")
+    else:
+        st.caption("🟡 Tip: your contact list needs first name, last name, email, class, "
+                   "section, and team for every student.")
+
     contact_file = st.file_uploader("Contact list (CSV/XLSX)",
                                     type=["csv", "xlsx", "xls"], key="survey_roster")
     if contact_file is not None:
