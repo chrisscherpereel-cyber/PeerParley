@@ -500,7 +500,7 @@ with tabs[0]:
                        "link: " + ", ".join(no_email[:8]) + ("…" if len(no_email) > 8 else ""))
 
     # ---- Already collected in Qualtrics? Upload the raw export instead -------
-    with st.expander("Already have responses? Upload a Qualtrics / raw export"):
+    with st.expander("Already have responses? Upload a Qualtrics / raw export - Optional - RARELY USED"):
         st.caption("Use this if you ran the evaluation in Qualtrics instead of the built-in "
                    "survey. Upload the raw export (CSV or XLSX) — PeerParley reads the "
                    "standard peer-evaluation layout (ratings, ranking, $ allocation, "
