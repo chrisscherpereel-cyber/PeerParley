@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="PeerParley mark">
+  <title>PeerParley mark</title>
+  <rect x="3" y="8" width="38" height="26" rx="10" fill="#0E2A3B"/>
+  <path d="M12 33 L12 44 L24 33 Z" fill="#0E2A3B"/>
+  <rect x="23" y="26" width="38" height="26" rx="10" fill="#3FB07A"/>
+  <path d="M49 51 L49 62 L37 51 Z" fill="#3FB07A"/>
+</svg>

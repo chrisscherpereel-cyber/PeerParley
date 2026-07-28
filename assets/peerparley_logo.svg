@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 78" width="300" height="78" role="img" aria-label="PeerParley — evaluation, made clear">
+  <title>PeerParley</title>
+  <rect x="2" y="10" width="40" height="27" rx="11" fill="#0E2A3B"/>
+  <path d="M11 36 L11 48 L24 36 Z" fill="#0E2A3B"/>
+  <rect x="22" y="28" width="40" height="27" rx="11" fill="#3FB07A"/>
+  <path d="M50 54 L50 66 L38 54 Z" fill="#3FB07A"/>
+  <text x="80" y="41" font-family="Helvetica,Arial,sans-serif" font-size="30" font-weight="800" fill="#0E2A3B">Peer<tspan fill="#0B7A4B">Parley</tspan></text>
+  <text x="82" y="62" font-family="Helvetica,Arial,sans-serif" font-size="13" font-style="italic" fill="#6B7A80">evaluation, made clear</text>
+</svg>

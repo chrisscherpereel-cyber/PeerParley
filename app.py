@@ -17,6 +17,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import io
+import os
 import re
 import urllib.parse
 import zipfile
@@ -43,17 +44,36 @@ from peerparley.ui_helpers import (
     make_mailer as _make_mailer,
 )
 
-st.set_page_config(page_title="PeerParley", page_icon="✅", layout="wide")
+# --------------------------------------------------------------------------- #
+# Brand assets (Parley logo). page_icon falls back to an emoji if the asset
+# file wasn't uploaded, so the app never crashes on a missing image.
+# --------------------------------------------------------------------------- #
+_ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+_ICON_PNG = os.path.join(_ASSET_DIR, "peerparley_mark.png")
+
+st.set_page_config(
+    page_title="PeerParley",
+    page_icon=_ICON_PNG if os.path.exists(_ICON_PNG) else "✅",
+    layout="wide",
+)
 
 # --------------------------------------------------------------------------- #
-# Brand header
+# Brand header — the Parley mark (two speech bubbles) + wordmark + tagline.
 # --------------------------------------------------------------------------- #
 st.markdown(
     """
     <div style="display:flex;align-items:center;gap:14px;padding:6px 0 2px">
-      <div style="background:#0E2A3B;color:#fff;border-radius:12px;
-                  padding:8px 14px;font-weight:800;font-size:22px">PeerParley</div>
-      <div style="color:#6B7A80;font-style:italic">Peer evaluation, made clear.</div>
+      <svg width="290" height="60" viewBox="0 0 300 78"
+           xmlns="http://www.w3.org/2000/svg" role="img" aria-label="PeerParley">
+        <rect x="2" y="10" width="40" height="27" rx="11" fill="#0E2A3B"/>
+        <path d="M11 36 L11 48 L24 36 Z" fill="#0E2A3B"/>
+        <rect x="22" y="28" width="40" height="27" rx="11" fill="#3FB07A"/>
+        <path d="M50 54 L50 66 L38 54 Z" fill="#3FB07A"/>
+        <text x="80" y="41" font-family="Helvetica,Arial,sans-serif" font-size="30"
+              font-weight="800" fill="#0E2A3B">Peer<tspan fill="#0B7A4B">Parley</tspan></text>
+        <text x="82" y="62" font-family="Helvetica,Arial,sans-serif" font-size="13"
+              font-style="italic" fill="#6B7A80">evaluation, made clear</text>
+      </svg>
     </div>
     """,
     unsafe_allow_html=True,
