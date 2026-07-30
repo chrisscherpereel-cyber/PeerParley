@@ -6,12 +6,14 @@ Two flavours, both downloadable as a zip:
   Thunderbird as a pre-filled draft (with the feedback PDF attached for results).
   You review and press Send.
 
-* **Auto-send pack** — the attachment PDFs plus two ready-to-run scripts,
-  `send_all_windows.ps1` and `send_all_mac.applescript`, with every message baked
-  in. Unzip, run the one for your OS, and your installed Outlook / Apple Mail
-  sends the whole batch automatically (the OS will ask permission the first time).
-  A web app can't do this itself — the browser sandbox forbids driving your
-  desktop mail app — so the work is handed to a script that runs on your machine.
+* **Auto-send pack** — the attachment PDFs plus ready-to-run scripts, with every
+  message baked in. The user just DOUBLE-CLICKS one file: `Send emails
+  (Windows).cmd` on Windows (a tiny launcher that runs the `send_all_windows.ps1`
+  engine with the execution policy bypassed, so there's no right-click / policy
+  fuss) or `send_all_mac.applescript` on Mac. Their installed Outlook / Apple Mail
+  then sends the whole batch (the OS asks permission the first time). A web app
+  can't do this itself — the browser sandbox forbids driving your desktop mail
+  app — so the work is handed to a script that runs on your machine.
 """
 from __future__ import annotations
 
@@ -141,6 +143,28 @@ def _as_str(s: str) -> str:
                   .replace("\r", "").replace("\n", "\\n")) + '"'
 
 
+def _windows_launcher() -> str:
+    """A double-clickable .cmd that runs the PowerShell engine for the user.
+
+    Double-clicking a .ps1 only opens Notepad, and running it by hand trips the
+    execution policy — too much for most people. This launcher does it all:
+    double-click, and it calls PowerShell with the policy bypassed for this one
+    run, from its own folder. Mirrors the Mac 'double-click and Run' experience.
+    """
+    return (
+        "@echo off\r\n"
+        "setlocal\r\n"
+        "cd /d \"%~dp0\"\r\n"
+        "echo.\r\n"
+        "echo   PeerParley - sending your emails through Outlook...\r\n"
+        "echo   (If Windows asks, choose \"More info\" then \"Run anyway\".)\r\n"
+        "echo.\r\n"
+        "powershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0send_all_windows.ps1\"\r\n"
+        "echo.\r\n"
+        "echo   All done. You can close this window.\r\n"
+        "pause\r\n")
+
+
 def _powershell(parts: List[dict]) -> str:
     rows = []
     for p in parts:
@@ -148,25 +172,39 @@ def _powershell(parts: List[dict]) -> str:
         rows.append("  @{ to=%s; subject=%s; body64=%s; atts=%s }" % (
             _ps_sq(p["to"]), _ps_sq(p["subject"]), _ps_sq(_b64(p["body"])), _ps_sq(atts)))
     return (
-        "# PeerParley — send everything via Windows Outlook.\n"
-        "# 1) Unzip this folder.  2) Right-click this file -> Run with PowerShell.\n"
-        "# Outlook must be installed and signed in. It will send from your account.\n"
+        "# PeerParley — email engine (Outlook). You don't run this directly:\n"
+        "# just double-click 'Send emails (Windows).cmd' in this folder.\n"
+        "# Outlook must be installed and signed in. It sends from your account.\n"
         "$ErrorActionPreference = 'Stop'\n"
         "$dir = Split-Path -Parent $MyInvocation.MyCommand.Path\n"
-        "$outlook = New-Object -ComObject Outlook.Application\n"
-        "$msgs = @(\n" + ",\n".join(rows) + "\n)\n"
-        "$sent = 0\n"
-        "foreach ($m in $msgs) {\n"
-        "  if (-not $m.to) { continue }\n"
-        "  $mail = $outlook.CreateItem(0)\n"
-        "  $mail.To = $m.to\n"
-        "  $mail.Subject = $m.subject\n"
-        "  $mail.HTMLBody = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($m.body64))\n"
-        "  if ($m.atts) { foreach ($a in ($m.atts -split ';')) { $p = Join-Path $dir $a;"
-        " if (Test-Path $p) { [void]$mail.Attachments.Add($p) } } }\n"
-        "  $mail.Send(); $sent++\n"
+        "try {\n"
+        "  $outlook = New-Object -ComObject Outlook.Application\n"
+        "} catch {\n"
+        "  Write-Host ''\n"
+        "  Write-Host 'Could not start Outlook. Make sure Microsoft Outlook is installed'\n"
+        "  Write-Host 'and signed in, then run this again.' -ForegroundColor Yellow\n"
+        "  return\n"
         "}\n"
-        "Write-Host \"Sent $sent message(s) via Outlook.\"\n")
+        "$msgs = @(\n" + ",\n".join(rows) + "\n)\n"
+        "$sent = 0; $skipped = 0\n"
+        "foreach ($m in $msgs) {\n"
+        "  if (-not $m.to) { $skipped++; continue }\n"
+        "  try {\n"
+        "    $mail = $outlook.CreateItem(0)\n"
+        "    $mail.To = $m.to\n"
+        "    $mail.Subject = $m.subject\n"
+        "    $mail.HTMLBody = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($m.body64))\n"
+        "    if ($m.atts) { foreach ($a in ($m.atts -split ';')) { $p = Join-Path $dir $a;"
+        " if (Test-Path $p) { [void]$mail.Attachments.Add($p) } } }\n"
+        "    $mail.Send(); $sent++\n"
+        "    Write-Host \"  sent -> $($m.to)\"\n"
+        "  } catch {\n"
+        "    Write-Host \"  could not send to $($m.to): $($_.Exception.Message)\" -ForegroundColor Yellow\n"
+        "  }\n"
+        "}\n"
+        "Write-Host ''\n"
+        "Write-Host \"Sent $sent message(s) via Outlook.\" -ForegroundColor Green\n"
+        "if ($skipped) { Write-Host \"$skipped had no email address and were skipped.\" }\n")
 
 
 def _applescript(parts: List[dict]) -> str:
@@ -245,16 +283,21 @@ _README = (
     "PeerParley — auto-send pack\n"
     "===========================\n\n"
     "This folder sends every email for you through the mail app already on your\n"
-    "computer. UNZIP it first (don't run anything from inside the .zip), then:\n\n"
-    "  MAC (Outlook or Apple Mail):  open 'send_all_mac.applescript' in Script Editor\n"
-    "                                (double-click it), click Run. Pick your mail app\n"
-    "                                when asked (Microsoft Outlook is the default).\n"
-    "  WINDOWS (Outlook):            right-click 'send_all_windows.ps1' -> Run with\n"
-    "                                PowerShell.\n\n"
-    "The first time, your computer asks permission to let it control the mail app —\n"
-    "approve it. Messages are sent from your own account, with the PDFs in this\n"
-    "folder attached. Prefer to review first? The same emails are also available as\n"
-    ".eml files, or use SMTP inside PeerParley for fully automatic sending.\n"
+    "computer. UNZIP it first (don't run anything from inside the .zip), then just\n"
+    "DOUBLE-CLICK the one file for your computer:\n\n"
+    "  WINDOWS (Outlook):            double-click  'Send emails (Windows).cmd'\n"
+    "  MAC (Outlook or Apple Mail):  double-click  'send_all_mac.applescript',\n"
+    "                                then click Run. Pick your mail app when asked\n"
+    "                                (Microsoft Outlook is the default).\n\n"
+    "That's it. On Windows, if you see a blue 'Windows protected your PC' box, click\n"
+    "'More info' then 'Run anyway' — it's just because the file came from the web.\n"
+    "The first time, your computer may ask permission to let it control the mail\n"
+    "app; approve it. Messages are sent from your own account, with the PDFs in this\n"
+    "folder attached.\n\n"
+    "(Advanced: 'send_all_windows.ps1' is the engine the Windows launcher runs — you\n"
+    "don't need to open it. Prefer to review each draft first? The same emails are\n"
+    "also available as .eml files, or use SMTP inside PeerParley for fully automatic\n"
+    "sending.)\n"
 )
 
 
@@ -268,6 +311,7 @@ def send_all_pack(parts: List[dict], folder_label: str = "Emails") -> bytes:
                 if fname not in seen:
                     z.writestr(fname, data)
                     seen.add(fname)
+        z.writestr("Send emails (Windows).cmd", _windows_launcher())
         z.writestr("send_all_windows.ps1", _powershell(parts))
         z.writestr("send_all_mac.applescript", _applescript(parts))
         z.writestr("READ ME FIRST.txt", _README)

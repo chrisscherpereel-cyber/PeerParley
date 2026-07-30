@@ -40,7 +40,8 @@ def require_login() -> bool:
         return False
 
     with st.form("pp_login", clear_on_submit=False):
-        username = st.text_input("Username", value="admin")
+        username = st.text_input("Username", value="",
+                                 placeholder="your username")
         pw = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Sign in")
 
