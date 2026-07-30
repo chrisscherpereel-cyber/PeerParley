@@ -340,6 +340,9 @@ def _link_delivery(key, recipients, subj, body, course, eval_no, base_ok, label)
         if st.session_state.get(f"{key}_autozip"):
             st.download_button("⬇ Download auto-send zip", st.session_state[f"{key}_autozip"],
                                f"{label.lower()}_autosend.zip", "application/zip")
+            st.caption("Unzip, then just **double-click** — `Send emails (Windows).cmd` on "
+                       "Windows, or `send_all_mac.applescript` on Mac. Sends from your own "
+                       "Outlook / Apple Mail.")
     else:  # links CSV
         df = pd.DataFrame([{"Team": r["team"], "Name": r["name"],
                             "Email": r.get("email", ""), "Link": r.get("link", "")}
@@ -373,6 +376,9 @@ def _results_delivery(key, teams, roster, subj, body, attach_team, course, eval_
         if st.session_state.get(f"{key}_autozip"):
             st.download_button("⬇ Download auto-send zip", st.session_state[f"{key}_autozip"],
                                "results_autosend.zip", "application/zip")
+            st.caption("Unzip, then just **double-click** — `Send emails (Windows).cmd` on "
+                       "Windows, or `send_all_mac.applescript` on Mac. Each student's PDF is "
+                       "attached automatically; keep the files together in the unzipped folder.")
     else:  # recipients CSV
         rows = []
         for t in teams:
